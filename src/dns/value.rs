@@ -265,7 +265,12 @@ impl Record {
             }
             (_, ttl) => Reach::Direct(ttl),
         };
-        let address = |what: &str| format!("{content:?} is not an {what} address");
+        let address = |what: &str| match content {
+            "" => {
+                format!("no {what} address: list the record's addresses, or set cloudflare.address")
+            }
+            _ => format!("{content:?} is not an {what} address"),
+        };
         let data = match kind {
             RecordType::A => Rdata::A {
                 address: content.parse().map_err(|_| address("IPv4"))?,
