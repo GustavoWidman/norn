@@ -11,7 +11,10 @@ use std::fmt::{Debug, Display};
 
 use chrono::{DateTime, Utc};
 
-use crate::model::Owner;
+use crate::{
+    cloudflare::{Api, ApiError, Capability, Write},
+    model::Owner,
+};
 
 pub(crate) trait Kind: Sized + Clone + Debug {
     /// how logs and reports name the kind: `dns record`
@@ -19,6 +22,9 @@ pub(crate) trait Kind: Sized + Clone + Debug {
 
     /// where objects live and are listed together: a zone, the account
     type Scope: Ord + Clone + Display + Debug;
+    /// the scope as cloudflare addresses it (dns: the zone's id), learned by
+    /// [Kind::read] and handed back to [Kind::write]
+    type Place: Clone + Debug;
     /// the slot an object fills in its scope (dns: name and type), also for
     /// shapes norn does not model, so they still occupy their slot
     type Key: Ord + Clone + Display + Debug;
@@ -38,6 +44,16 @@ pub(crate) trait Kind: Sized + Clone + Debug {
     /// object occupies the different slot `other`. dns: a CNAME shares its
     /// name with nothing.
     fn excludes(want: &Self::Key, other: &Self::Key) -> bool;
+
+    /// every object in `scope`, its mark read into an [Ownership]
+    fn read<C: Capability>(
+        api: &Api<C>,
+        scope: &Self::Scope,
+    ) -> Result<(Self::Place, Vec<Live<Self>>), ApiError>;
+
+    /// carries out one step, writing the step's owner into the object's mark
+    /// in the same request as its content. only a writer can call it.
+    fn write(api: &Api<Write>, place: &Self::Place, step: &Step<Self>) -> Result<(), ApiError>;
 }
 
 /// an object as cloudflare reports it
