@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, fmt, path::Path};
 use crate::{
     dns::{Dns, Record, RecordType, Slot},
     kind::{Ladder, Want},
-    model::{HostName, Owner, Owners, Zones},
+    model::{Fqdn, HostName, Owner, Owners, Zones},
 };
 
 /// what the service does with its plan. the fleet rolls out report, then
@@ -268,17 +268,20 @@ fn collisions(host_owned: &[Record], fleet_owned: &[Record]) -> Vec<(String, Str
             found.push((subject, "a name holds one CNAME".into()));
         }
     }
-    let mut names: BTreeMap<&crate::model::Fqdn, Vec<&RecordType>> = BTreeMap::new();
+    let mut names: BTreeMap<&Fqdn, Vec<&str>> = BTreeMap::new();
     for slot in slots.keys() {
-        names.entry(&slot.name).or_default().push(&slot.kind);
+        names
+            .entry(&slot.name)
+            .or_default()
+            .push(slot.kind.as_str());
     }
     for (name, kinds) in names {
-        if kinds.contains(&&RecordType::Cname) && kinds.len() > 1 {
-            let others: Vec<&str> = kinds
-                .iter()
-                .filter(|kind| ***kind != RecordType::Cname)
-                .map(|kind| kind.as_str())
-                .collect();
+        let others: Vec<&str> = kinds
+            .iter()
+            .copied()
+            .filter(|kind| *kind != "CNAME")
+            .collect();
+        if kinds.contains(&"CNAME") && !others.is_empty() {
             found.push((
                 format!("dns {name} CNAME"),
                 format!(
