@@ -4,3 +4,7 @@
 mod dns;
 mod kind;
 mod model;
+mod plan;
+
+#[cfg(test)]
+mod test;
