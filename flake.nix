@@ -45,7 +45,12 @@
         };
 
         perSystem =
-          { pkgs, system, ... }:
+          {
+            pkgs,
+            system,
+            lib,
+            ...
+          }:
           let
             toolchain = fenix.packages.${system}.fromToolchainFile {
               file = ./rust-toolchain.toml;
@@ -61,7 +66,15 @@
             checks = {
               inherit norn;
             }
-            // norn.passthru.checks;
+            // norn.passthru.checks
+            // import ./nix/checks.nix {
+              inherit
+                pkgs
+                lib
+                self
+                norn
+                ;
+            };
 
             devshells.default = {
               packages = [
