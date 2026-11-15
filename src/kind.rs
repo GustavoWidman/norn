@@ -133,6 +133,27 @@ pub(crate) enum Rung {
     Enforce,
 }
 
+/// how far a writing run goes
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Ladder {
+    /// only stamp marks on unmarked objects that already equal their declaration
+    Adopt,
+    /// create, update and delete marked objects, and adopt as above: an exact
+    /// unmarked twin would otherwise block a create forever
+    Enforce,
+}
+
+impl Ladder {
+    /// the single check between adopt and enforce; the rung comes from the
+    /// generic step variant, so no kind can label an update as an adopt
+    pub fn permits(self, rung: Rung) -> bool {
+        match self {
+            Ladder::Adopt => rung == Rung::Adopt,
+            Ladder::Enforce => true,
+        }
+    }
+}
+
 impl<K: Kind> Step<K> {
     pub fn rung(&self) -> Rung {
         match self {

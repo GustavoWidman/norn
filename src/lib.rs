@@ -2,6 +2,7 @@
 //! configuration, from each machine, during that machine's own activation.
 
 pub mod cloudflare;
+mod desired;
 mod dns;
 mod kind;
 mod model;
