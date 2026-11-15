@@ -1,0 +1,274 @@
+//! an in-memory cloudflare behind the real client: zone lookups, paged
+//! record listings, and record writes with cloudflare's envelope, its 404s
+//! and its identical-record rejection. every request is logged, so a test
+//! asserts what a run sent.
+
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use serde_json::{Value, json};
+
+use crate::cloudflare::{Answer, Deliver, Fetch, Verb};
+
+pub(crate) struct Cloudflare {
+    state: Mutex<State>,
+    /// the most records one page holds, whatever the client asks for
+    page_cap: usize,
+}
+
+#[derive(Default)]
+struct State {
+    /// zone id -> name
+    zones: BTreeMap<String, String>,
+    /// zone id -> records, as cloudflare reports them
+    records: BTreeMap<String, Vec<Value>>,
+    requests: Vec<String>,
+    serial: u64,
+}
+
+impl Cloudflare {
+    pub fn new(page_cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::default(),
+            page_cap,
+        })
+    }
+
+    /// adds a record as cloudflare would have stored it, creating its zone;
+    /// a record without an id gets one
+    pub fn seed(&self, zone: &str, mut record: Value) {
+        let mut state = self.state.lock().unwrap();
+        let id = state.zone_id(zone);
+        if record.get("id").is_none() {
+            state.stamp(&mut record);
+        }
+        state.records.entry(id).or_default().push(record);
+    }
+
+    /// every request but GETs, as `VERB path body`
+    pub fn writes(&self) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .requests
+            .iter()
+            .filter(|request| !request.starts_with("GET "))
+            .cloned()
+            .collect()
+    }
+
+    pub fn requests(&self) -> usize {
+        self.state.lock().unwrap().requests.len()
+    }
+
+    pub fn records(&self, zone: &str) -> Vec<Value> {
+        let state = self.state.lock().unwrap();
+        let id = state
+            .zones
+            .iter()
+            .find(|(_, name)| *name == zone)
+            .map(|(id, _)| id.clone());
+        id.and_then(|id| state.records.get(&id).cloned())
+            .unwrap_or_default()
+    }
+}
+
+impl State {
+    fn zone_id(&mut self, zone: &str) -> String {
+        if let Some((id, _)) = self.zones.iter().find(|(_, name)| *name == zone) {
+            return id.clone();
+        }
+        let id = format!("{:032x}", 0xa000 + self.zones.len());
+        self.zones.insert(id.clone(), zone.to_owned());
+        id
+    }
+
+    fn stamp(&mut self, record: &mut Value) {
+        self.serial += 1;
+        record["id"] = json!(format!("{:032x}", self.serial));
+        record["created_on"] = json!(format!(
+            "2026-01-01T00:00:{:02}.{:06}Z",
+            self.serial % 60,
+            self.serial
+        ));
+        record["modified_on"] = record["created_on"].clone();
+        settle(record);
+    }
+}
+
+/// what cloudflare stores of a written record: a proxied record's ttl is
+/// automatic, and only A, AAAA and CNAME carry `proxied`
+fn settle(record: &mut Value) {
+    let proxiable = matches!(record["type"].as_str(), Some("A" | "AAAA" | "CNAME"));
+    if !proxiable {
+        record["proxied"] = json!(false);
+    }
+    if record["proxied"] == json!(true) {
+        record["ttl"] = json!(1);
+    }
+    if record.get("comment").is_none() {
+        record["comment"] = Value::Null;
+    }
+}
+
+fn ok(result: Value, info: Option<Value>) -> Answer {
+    let mut body = json!({ "success": true, "errors": [], "messages": [], "result": result });
+    if let Some(info) = info {
+        body["result_info"] = info;
+    }
+    Ok((200, serde_json::to_vec(&body).unwrap()))
+}
+
+fn refused(status: u16, code: u32, message: &str) -> Answer {
+    let body = json!({ "success": false, "errors": [{ "code": code, "message": message }], "messages": [], "result": null });
+    Ok((status, serde_json::to_vec(&body).unwrap()))
+}
+
+impl Fetch for Cloudflare {
+    fn get(&self, path: &str, query: &[(&str, &str)], _token: &str, _timeout: Duration) -> Answer {
+        let mut state = self.state.lock().unwrap();
+        let shown: Vec<String> = query
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        state
+            .requests
+            .push(format!("GET {path}?{}", shown.join("&")));
+        let arg = |key: &str| {
+            query
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, value)| *value)
+        };
+
+        if path == "/zones" {
+            let zones: Vec<Value> = state
+                .zones
+                .iter()
+                .filter(|(_, name)| arg("name").is_none_or(|wanted| wanted == name.as_str()))
+                .map(|(id, name)| json!({ "id": id, "name": name }))
+                .collect();
+            return ok(json!(zones), None);
+        }
+        let Some(zone) = path
+            .strip_prefix("/zones/")
+            .and_then(|rest| rest.strip_suffix("/dns_records"))
+        else {
+            return Ok((
+                404,
+                b"{\"success\":false,\"errors\":[],\"result\":null}".to_vec(),
+            ));
+        };
+        let Some(records) = state.records.get(zone) else {
+            return refused(404, 7003, "Could not route to /zones");
+        };
+        let page: usize = arg("page").and_then(|page| page.parse().ok()).unwrap_or(1);
+        let per_page: usize = arg("per_page")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(100)
+            .min(self.page_cap);
+        let total_pages = records.len().div_ceil(per_page).max(1);
+        let listed: Vec<Value> = records
+            .iter()
+            .skip((page - 1) * per_page)
+            .take(per_page)
+            .cloned()
+            .collect();
+        let info = json!({
+            "page": page,
+            "per_page": per_page,
+            "count": listed.len(),
+            "total_count": records.len(),
+            "total_pages": total_pages,
+        });
+        ok(json!(listed), Some(info))
+    }
+}
+
+impl Deliver for Cloudflare {
+    fn send(
+        &self,
+        verb: Verb,
+        path: &str,
+        body: Option<Vec<u8>>,
+        _token: &str,
+        _timeout: Duration,
+    ) -> Answer {
+        let mut state = self.state.lock().unwrap();
+        let body: Option<Value> = body.map(|body| serde_json::from_slice(&body).unwrap());
+        let shown = body.as_ref().map(Value::to_string).unwrap_or_default();
+        let name = match verb {
+            Verb::Post => "POST",
+            Verb::Put => "PUT",
+            Verb::Patch => "PATCH",
+            Verb::Delete => "DELETE",
+        };
+        state
+            .requests
+            .push(format!("{name} {path} {shown}").trim_end().to_owned());
+
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let (zone, id) = match parts.as_slice() {
+            ["zones", zone, "dns_records"] => (zone.to_string(), None),
+            ["zones", zone, "dns_records", id] => (zone.to_string(), Some(id.to_string())),
+            _ => return refused(404, 7003, "Could not route"),
+        };
+        if !state.records.contains_key(&zone) {
+            return refused(404, 7003, "Could not route to /zones");
+        }
+
+        match (verb, id) {
+            (Verb::Post, None) => {
+                let mut record = body.expect("a create has a body");
+                let records = &state.records[&zone];
+                let identical = records.iter().any(|existing| {
+                    ["type", "name", "content"]
+                        .iter()
+                        .all(|field| existing[field] == record[field])
+                });
+                if identical {
+                    return refused(400, 81058, "An identical record already exists.");
+                }
+                state.stamp(&mut record);
+                state.records.get_mut(&zone).unwrap().push(record.clone());
+                ok(record, None)
+            }
+            (verb, Some(id)) => {
+                let records = state.records.get_mut(&zone).unwrap();
+                let Some(index) = records.iter().position(|record| record["id"] == json!(id))
+                else {
+                    return refused(404, 81044, "Record does not exist.");
+                };
+                match verb {
+                    Verb::Delete => {
+                        records.remove(index);
+                        ok(json!({ "id": id }), None)
+                    }
+                    Verb::Put | Verb::Patch => {
+                        let record = &mut records[index];
+                        if verb == Verb::Put {
+                            for field in [
+                                "type", "name", "content", "proxied", "ttl", "priority", "comment",
+                            ] {
+                                if let Some(object) = record.as_object_mut() {
+                                    object.remove(field);
+                                }
+                            }
+                        }
+                        for (field, value) in
+                            body.expect("a rewrite has a body").as_object().unwrap()
+                        {
+                            record[field] = value.clone();
+                        }
+                        settle(record);
+                        ok(record.clone(), None)
+                    }
+                    Verb::Post => refused(405, 10000, "Method not allowed"),
+                }
+            }
+            (_, None) => refused(405, 10000, "Method not allowed"),
+        }
+    }
+}

@@ -48,6 +48,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
 
 pub use http::Clock;
+#[cfg(test)]
+pub(crate) use http::{Answer, Deliver, Fetch};
 
 mod sealed {
     pub trait Sealed {}
@@ -183,11 +185,6 @@ impl Token {
             return Err(TokenError::Empty);
         }
         Ok(Self(Zeroizing::new(token.to_owned())))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fake() -> Self {
-        Self(Zeroizing::new("fake".into()))
     }
 }
 

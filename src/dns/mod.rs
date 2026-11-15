@@ -165,6 +165,7 @@ impl Reported<'_> {
 }
 
 /// the comment that marks `owner`'s records
+#[cfg(test)]
 pub(crate) fn mark(owner: &crate::model::Owner) -> String {
     mark::write(owner)
 }

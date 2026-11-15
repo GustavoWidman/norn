@@ -47,6 +47,12 @@ pub(crate) struct Desired {
     pub fleet_owned: Vec<Record>,
 }
 
+/// one run's declarations, kind by kind. the run destructures it
+/// exhaustively, so a kind added here does not compile until the run visits it.
+pub(crate) struct Wants {
+    pub dns: Vec<Want<Dns>>,
+}
+
 /// a finding in the desired file, worded for whoever edits the nix
 #[derive(Debug, PartialEq)]
 pub(crate) struct Problem {
@@ -200,7 +206,12 @@ impl Desired {
         Owners::machine(self.host.clone())
     }
 
-    pub fn dns(&self) -> Vec<Want<Dns>> {
+    /// what this machine's runs want, kind by kind
+    pub fn wants(&self) -> Wants {
+        Wants { dns: self.dns() }
+    }
+
+    fn dns(&self) -> Vec<Want<Dns>> {
         let owned = |owner: Owner, records: &[Record]| -> Vec<Want<Dns>> {
             records
                 .iter()

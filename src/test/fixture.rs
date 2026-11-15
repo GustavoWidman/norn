@@ -92,6 +92,23 @@ impl Wire {
         .expect("fixture names parse")
     }
 
+    /// the record's fields as cloudflare's json spells them
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": self.kind,
+            "name": self.name,
+            "content": self.content,
+            "proxiable": self.proxied.is_some(),
+            "proxied": self.proxied.unwrap_or(false),
+            "ttl": self.ttl,
+            "priority": self.priority,
+            "comment": self.comment,
+            "settings": {},
+            "meta": {},
+            "tags": [],
+        })
+    }
+
     /// what cloudflare stores for a record norn writes whole
     pub fn written(record: &Record, owner: &Owner) -> Self {
         let reach = record.data.reach();
@@ -184,6 +201,14 @@ pub(crate) fn apply(live: Vec<Live<Dns>>, steps: &[Step<Dns>]) -> Vec<Live<Dns>>
 /// three zones shaped like a small fleet's: two machines' sites, mail, ACME
 /// challenges, a commented dummy and Email Routing records
 pub(crate) fn baseline() -> Vec<(Zone, Vec<Live<Dns>>)> {
+    baseline_records()
+        .into_iter()
+        .map(|(name, records)| (zone(name), records.iter().map(Wire::live).collect()))
+        .collect()
+}
+
+/// [baseline] as cloudflare stores it
+pub(crate) fn baseline_records() -> Vec<(&'static str, Vec<Wire>)> {
     let net = vec![
         wire("A", "blog.example.net", "192.0.2.20").proxied(),
         wire("A", "example.net", "192.0.2.20").proxied(),
@@ -258,11 +283,10 @@ pub(crate) fn baseline() -> Vec<(Zone, Vec<Live<Dns>>)> {
             "\"v=spf1 include:_spf.mx.example.net ~all\"",
         ),
     ];
-    let live = |records: Vec<Wire>| records.iter().map(Wire::live).collect();
     vec![
-        (zone("example.com"), live(com)),
-        (zone("example.net"), live(net)),
-        (zone("example.org"), live(org)),
+        ("example.com", com),
+        ("example.net", net),
+        ("example.org", org),
     ]
 }
 
