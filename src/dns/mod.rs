@@ -4,7 +4,9 @@
 mod mark;
 mod value;
 
-pub(crate) use value::{Content, Record, RecordType, Slot, Ttl};
+#[cfg(test)]
+pub(crate) use value::Ttl;
+pub(crate) use value::{Content, Record, RecordType, Slot};
 
 use chrono::{DateTime, Utc};
 
