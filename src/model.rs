@@ -17,7 +17,10 @@ impl HostName {
         if name.is_empty() || name.len() > 63 {
             return Err(format!("{name:?} is not 1 to 63 bytes long"));
         }
-        if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
             return Err(format!("{name:?} has a character outside [a-z0-9-]"));
         }
         if name.starts_with('-') || name.ends_with('-') {
@@ -90,9 +93,12 @@ impl Fqdn {
                 continue;
             }
             if label.is_empty() || label.len() > 63 {
-                return Err(format!("{name:?} has a label that is not 1 to 63 bytes long"));
+                return Err(format!(
+                    "{name:?} has a label that is not 1 to 63 bytes long"
+                ));
             }
-            let allowed = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_';
+            let allowed =
+                |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_';
             if !label.bytes().all(allowed) {
                 return Err(format!(
                     "{name:?} is not in canonical form: lowercase, no trailing dot, labels of [a-z0-9_-]"
@@ -191,7 +197,11 @@ impl Zones {
         if names.is_empty() {
             problems.push("no zones: cloudflare.zones lists the zones the fleet manages".into());
         }
-        if problems.is_empty() { Ok(Self(zones)) } else { Err(problems) }
+        if problems.is_empty() {
+            Ok(Self(zones))
+        } else {
+            Err(problems)
+        }
     }
 
     pub fn zone_of(&self, name: &Fqdn) -> Option<&Zone> {
@@ -230,26 +240,49 @@ mod tests {
 
     #[test]
     fn a_live_name_is_folded_to_the_canonical_spelling() {
-        assert_eq!(Fqdn::from_live("WWW.Example.com."), Fqdn::parse("www.example.com").ok());
+        assert_eq!(
+            Fqdn::from_live("WWW.Example.com."),
+            Fqdn::parse("www.example.com").ok()
+        );
     }
 
     #[test]
     fn names_order_by_reversed_labels() {
-        let mut names: Vec<Fqdn> = ["s3.cache.example.com", "example.com", "cache.example.com", "a.example.org"]
-            .into_iter()
-            .map(|name| Fqdn::parse(name).unwrap())
-            .collect();
+        let mut names: Vec<Fqdn> = [
+            "s3.cache.example.com",
+            "example.com",
+            "cache.example.com",
+            "a.example.org",
+        ]
+        .into_iter()
+        .map(|name| Fqdn::parse(name).unwrap())
+        .collect();
         names.sort();
         let names: Vec<&str> = names.iter().map(Fqdn::as_str).collect();
-        assert_eq!(names, ["example.com", "cache.example.com", "s3.cache.example.com", "a.example.org"]);
+        assert_eq!(
+            names,
+            [
+                "example.com",
+                "cache.example.com",
+                "s3.cache.example.com",
+                "a.example.org"
+            ]
+        );
     }
 
     #[test]
     fn a_name_belongs_to_its_longest_zone() {
         let zones = Zones::parse(&["example.com".into(), "sub.example.com".into()]).unwrap();
-        let zone_of = |name: &str| zones.zone_of(&Fqdn::parse(name).unwrap()).map(|zone| zone.to_string());
+        let zone_of = |name: &str| {
+            zones
+                .zone_of(&Fqdn::parse(name).unwrap())
+                .map(|zone| zone.to_string())
+        };
         assert_eq!(zone_of("www.example.com").as_deref(), Some("example.com"));
-        assert_eq!(zone_of("a.sub.example.com").as_deref(), Some("sub.example.com"));
+        assert_eq!(
+            zone_of("a.sub.example.com").as_deref(),
+            Some("sub.example.com")
+        );
         assert_eq!(zone_of("badexample.com"), None);
     }
 
