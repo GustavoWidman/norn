@@ -11,12 +11,15 @@
         zones = [ "example.com" ];
         address.ipv4 = "192.0.2.10";
         dns."machine.example.com".a = { };
+        fleet.dns."shared.example.com".a.addresses = [ "192.0.2.20" ];
       };
 
       services.norn = {
         enable = true;
         mode = "report";
         tokenFile = "/run/norn-test/token";
+        revision = 1794942959;
+        rollout.file = "/home/deploy/rollout.json";
         peers.machine = config.cloudflare.claims;
       };
 
@@ -77,6 +80,34 @@
           assert ran["counts"]["unread"] == 1, ran
           described = machine.succeed("norn status")
           assert described.startswith("failing") and "unread: dns record example.com" in described, described
+
+      # every zone is unread, so the gate holds before it looks at the rollout
+      # file; only the log says whether the unit could read it
+      with subtest("the unit reads a rollout file under /home, and a missing one only holds the fleet"):
+          def journal():
+              invocation = machine.succeed("systemctl show --property=InvocationID --value norn.service").strip()
+              return machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} --no-pager -o cat")
+
+          held = "fleet scope: hold: a zone could not be read"
+          protected = machine.succeed("systemctl show --property=ProtectHome --value norn.service").strip()
+          assert protected == "read-only", protected
+          machine.succeed(
+              "install -d -m 0755 /home/deploy",
+              """printf '{"committed": 1794942959, "checked": %s}' "$(date +%s)" > /home/deploy/rollout.json""",
+              "chmod 0644 /home/deploy/rollout.json",
+          )
+          machine.succeed("systemctl restart norn.service")
+          ran_cleanly("norn.service")
+          read = journal()
+          assert held in read and "rollout is unknown" not in read, read
+
+          machine.succeed("rm /home/deploy/rollout.json")
+          machine.succeed("systemctl restart norn.service")
+          ran_cleanly("norn.service")
+          machine.succeed("systemctl is-active norn.service")
+          missing = journal()
+          assert held in missing, missing
+          assert "the fleet's rollout is unknown: /home/deploy/rollout.json: No such file or directory" in missing, missing
 
       with subtest("a root norn converge is refused and leaves the service working"):
           refused = machine.fail("norn converge 2>&1")

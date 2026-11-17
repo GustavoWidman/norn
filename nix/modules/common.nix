@@ -37,20 +37,29 @@ let
       };
     };
 
+  # `address` is null for records no one machine owns, which name their addresses
   recordSet =
     address:
+    let
+      pointed =
+        type:
+        if address == null then
+          "${type} records, one per address in `addresses`."
+        else
+          "${type} records; `{ }` points one at this machine's address.";
+    in
     types.submodule {
       options = {
         a = mkOption {
-          type = types.nullOr (addressSet "ipv4" address.ipv4);
+          type = types.nullOr (addressSet "ipv4" (address.ipv4 or null));
           default = null;
           example = lib.literalExpression "{ proxied = true; }";
-          description = "A records; `{ }` points one at this machine's address.";
+          description = pointed "A";
         };
         aaaa = mkOption {
-          type = types.nullOr (addressSet "ipv6" address.ipv6);
+          type = types.nullOr (addressSet "ipv6" (address.ipv6 or null));
           default = null;
-          description = "AAAA records; `{ }` points one at this machine's address.";
+          description = pointed "AAAA";
         };
         cname = mkOption {
           type = types.nullOr (
@@ -141,10 +150,14 @@ let
 
   desired = pkgs.runCommandLocal "norn-desired.json" {
     raw = builtins.toJSON {
-      schema = 2;
+      schema = 3;
       inherit (cfg) host mode;
       inherit (cf) zones;
       dns = rows cf.dns;
+      fleet = {
+        inherit (cfg) revision;
+        dns = rows cf.fleet.dns;
+      };
     };
     passAsFile = [ "raw" ];
   } ''
@@ -161,11 +174,18 @@ let
         lib.groupBy (entry: entry.key) claimed
       );
       contested = lib.filterAttrs (_: hosts: lib.length hosts > 1) owners;
+      shared = keys cf.fleet.dns;
+      everything = lib.unique (lib.attrNames owners ++ shared);
       nameOf = key: lib.head (lib.splitString " " key);
-      cnames = lib.filter (key: lib.hasSuffix " CNAME" key) (lib.attrNames owners);
-      beside =
-        cname:
-        lib.filter (key: key != cname && nameOf key == nameOf cname) (lib.attrNames owners);
+      cnames = lib.filter (key: lib.hasSuffix " CNAME" key) everything;
+      beside = cname: lib.filter (key: key != cname && nameOf key == nameOf cname) everything;
+      unaddressed = lib.filter (row: row.content == "" && lib.elem row.type [
+        "A"
+        "AAAA"
+      ]) (rows cf.fleet.dns);
+      disagreeing = lib.attrNames (
+        lib.filterAttrs (_: claims: (claims.fleet or [ ]) != rows cf.fleet.dns) peers
+      );
     in
     [
       {
@@ -177,10 +197,22 @@ let
       assertion = false;
       message = "norn: ${key} is claimed by ${lib.concatStringsSep " and " hosts}; one name and type has one owner.";
     }) contested
+    ++ map (key: {
+      assertion = !(owners ? ${key});
+      message = "norn: ${key} is claimed by ${lib.concatStringsSep " and " (owners.${key} or [ ])} and by the fleet; one name and type has one owner.";
+    }) shared
     ++ map (cname: {
       assertion = beside cname == [ ];
       message = "norn: ${cname} shares its name with ${lib.concatStringsSep ", " (beside cname)}; a CNAME shares its name with nothing.";
-    }) cnames;
+    }) cnames
+    ++ map (row: {
+      assertion = false;
+      message = "norn: fleet record ${row.name} ${row.type} names no addresses; a shared record lists its own.";
+    }) unaddressed
+    ++ lib.optional (disagreeing != [ ]) {
+      assertion = false;
+      message = "norn: ${lib.concatStringsSep ", " disagreeing} declare${lib.optionalString (lib.length disagreeing == 1) "s"} other fleet records than ${cfg.host}; every machine declares the same cloudflare.fleet.dns.";
+    };
 in
 {
   options.cloudflare = {
@@ -210,9 +242,21 @@ in
       example = lib.literalExpression ''{ "cache.example.com".a = { }; }'';
       description = ''
         Records this machine owns, by name. Only this machine writes them, and
-        no other machine may declare the same name and type. A record no one
-        machine owns, such as a domain's mail setup, is declared on the machine
-        that serves it.
+        no other machine may declare the same name and type. A record that
+        belongs to no one machine goes in `cloudflare.fleet.dns`.
+      '';
+    };
+
+    fleet.dns = mkOption {
+      type = types.attrsOf (recordSet null);
+      default = { };
+      example = lib.literalExpression ''{ "tunnel.example.com".cname.target = "<id>.cfargotunnel.com"; }'';
+      description = ''
+        Records the whole fleet shares, by name, in the shape of
+        `cloudflare.dns`, except that A and AAAA records list their
+        `addresses`. Every machine declares the same set, usually from one
+        shared module, and any machine running the newest configuration
+        writes them.
       '';
     };
 
@@ -235,6 +279,45 @@ in
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
       defaultText = lib.literalExpression "norn.packages.\${system}.default";
+    };
+
+    revision = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = lib.literalExpression "if self ? rev then self.lastModified else null";
+      description = ''
+        The commit time, in unix seconds, of the commit this configuration is
+        built from, or null for an uncommitted tree. A newer revision
+        outranks an older one when they disagree on the fleet's shared
+        records, and a configuration without one never writes them. Set it
+        from the flake: `if self ? rev then self.lastModified else null`.
+      '';
+    };
+
+    rollout = {
+      file = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/var/lib/fleet/rollout.json";
+        description = ''
+          A JSON file the fleet's deploy tool writes:
+          `{ "committed": <revision>, "checked": <unix seconds> }`, the newest
+          revision the whole reachable fleet runs and when that was last
+          confirmed. With it, norn deletes a retiring shared record once the
+          whole fleet runs the configuration that dropped it, and a machine
+          behind the rollout holds. Without it, retiring records are never
+          deleted. It must be readable by every user, and a missing or stale
+          file only holds the shared records. On NixOS, a file under `/home`,
+          `/root` or `/run/user` makes the units see those read-only rather
+          than not at all.
+        '';
+      };
+
+      maxAge = mkOption {
+        type = types.ints.positive;
+        default = 1800;
+        description = "Seconds after `checked` past which the rollout file counts as unknown.";
+      };
     };
 
     host = mkOption {
@@ -321,6 +404,7 @@ in
       cloudflare.claims = {
         enabled = cfg.enable;
         keys = keys cf.dns;
+        fleet = rows cf.fleet.dns;
       };
     }
 
@@ -338,6 +422,12 @@ in
           "${toString cfg.requestTimeout}s"
           "--max-deletes"
           (toString cfg.maxDeletes)
+        ]
+        ++ lib.optionals (cfg.rollout.file != null) [
+          "--rollout"
+          cfg.rollout.file
+          "--rollout-max-age"
+          "${toString cfg.rollout.maxAge}s"
         ];
       };
 
@@ -354,7 +444,10 @@ in
               --set-default NORN_DESIRED /etc/norn/desired.json \
               --set-default NORN_TOKEN_FILE ${lib.escapeShellArg cfg.tokenFile} \
               --set-default NORN_STATE_DIR /var/lib/norn \
-              --set-default NORN_MAX_DELETES ${toString cfg.maxDeletes}
+              --set-default NORN_MAX_DELETES ${toString cfg.maxDeletes} ${
+                lib.optionalString (cfg.rollout.file != null)
+                  "--set-default NORN_ROLLOUT ${lib.escapeShellArg cfg.rollout.file} --set-default NORN_ROLLOUT_MAX_AGE ${toString cfg.rollout.maxAge}s"
+              }
           '';
         })
       ];

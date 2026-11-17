@@ -6,6 +6,16 @@
 let
   cfg = config.services.norn;
 
+  # the unit hides these from itself, so a rollout file in one of them would
+  # read as missing and hold the fleet's records for good
+  homes = [
+    "/home/"
+    "/root/"
+    "/run/user/"
+  ];
+  rolloutInHome =
+    cfg.rollout.file != null && lib.any (home: lib.hasPrefix home cfg.rollout.file) homes;
+
   command = lib.escapeShellArgs (
     [
       (lib.getExe cfg.package)
@@ -41,7 +51,7 @@ let
       TimeoutStartSec = "${toString (cfg.deadline + 60)}s";
 
       ProtectSystem = "strict";
-      ProtectHome = true;
+      ProtectHome = if rolloutInHome then "read-only" else true;
       PrivateTmp = true;
       PrivateDevices = true;
       NoNewPrivileges = true;
