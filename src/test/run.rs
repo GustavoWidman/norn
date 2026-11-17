@@ -32,7 +32,6 @@ impl Machine {
         Self { dir, host }
     }
 
-    /// writes the desired file the way the nix module installs it: `check`'s canonical form
     fn declare(&self, mode: Mode, wants: Vec<Want<crate::dns::Dns>>) -> PathBuf {
         let records: Vec<Record> = wants.into_iter().map(|want| want.value).collect();
         let zones = ["example.com", "example.net", "example.org"].map(String::from);
@@ -97,7 +96,6 @@ fn timing() -> Timing {
     }
 }
 
-/// the baseline on a cloudflare that pages every three records
 fn cloudflare() -> Arc<fake::Cloudflare> {
     let fake = fake::Cloudflare::new(3);
     for (zone, records) in baseline_records() {

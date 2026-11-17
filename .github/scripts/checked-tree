@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Prints the id of a successful pull request run of check.yml whose `nix check` ran on
-# exactly the tree of the given commit, and fails when there is none. The same tree is the
-# same flake, lock file included, so it evaluates to the same derivations and that run's
-# `nix flake check` holds for the commit too.
-#
-# check.yml records each tree it validated as an artifact named nix-check-<tree>. Only runs
-# from branches of this repository count: a fork's pull request runs the fork's workflow
-# file, which could upload the artifact without checking anything.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -20,6 +12,8 @@ tree=$(git rev-parse --verify "$1^{tree}")
 runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=nix-check-$tree&per_page=100" \
   --jq '.artifacts[] | select(.expired | not) | .workflow_run.id')
 
+# Only runs from branches of this repository count: a fork's pull request runs the fork's
+# workflow file, which could upload the artifact without checking anything.
 for run in $runs; do
   if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq '
     select(

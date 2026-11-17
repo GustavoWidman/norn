@@ -1,8 +1,6 @@
 //! where a record's owner is written: its comment, the only free-text field
 //! cloudflare's free plan gives a record (one per record, at most 100 bytes;
-//! tags are paid). the grammar lives here and nowhere else.
-//!
-//! a mark is the whole comment: `norn v1 fleet` or `norn v1 host=<host>`.
+//! tags are paid).
 
 use crate::{
     kind::Ownership,
@@ -11,10 +9,6 @@ use crate::{
 
 const PREFIX: &str = "norn ";
 
-/// a record's comment, read as ownership:
-/// - exactly `norn v1 fleet` or `norn v1 host=<host>` is that owner's mark;
-/// - anything else starting with `norn ` is unreadable, and never touched;
-/// - anything else, a person's note or nothing, is unmarked.
 pub(super) fn read(comment: Option<&str>) -> Ownership {
     let comment = match comment {
         None | Some("") => return Ownership::Unmarked { annotated: false },
@@ -32,7 +26,6 @@ pub(super) fn read(comment: Option<&str>) -> Ownership {
     }
 }
 
-/// the comment that marks `owner`'s records; at most 76 bytes by [HostName]'s grammar
 pub(super) fn write(owner: &Owner) -> String {
     match owner {
         Owner::Fleet => format!("{PREFIX}v1 fleet"),

@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Moves the Rust dependency build (crane's buildDepsOnly output and the vendored crate
-# sources it references) between the Nix store and $RUNNER_TEMP/norn-deps, a local
-# binary cache that cache-nix-action keeps in the GitHub Actions cache. That is about
-# 80 MB per system, against compiling every dependency again.
-#
-#   deps-cache locate        prints the store path and cache key, as step outputs
-#   deps-cache import <path> copies <path> from the restored cache into the store
-#   deps-cache export <path> writes <path> and its closure into the cache to be saved
-#
-# The key is the output path's hash, so an entry only ever restores the exact build the
-# job is about to need, and nothing is restored when the dependencies changed.
 set -euo pipefail
 
 cache="${RUNNER_TEMP:?missing runner temp directory}/norn-deps"
@@ -22,7 +11,8 @@ case "${1:-}" in
     printf 'path=%s\nkey=norn-deps-%s-%s\n' "$path" "$system" "${hash%%-*}"
     ;;
   import)
-    # The cache is unsigned; it only ever holds what this repository's main builds saved.
+    # GitHub hands main's cache entries to pull requests read-only, and only main's
+    # release runs save one, so the unsigned import only ever sees main's builds
     nix copy --no-check-sigs --from "file://$cache" "${2:?missing store path}"
     ;;
   export)

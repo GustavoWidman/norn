@@ -2,7 +2,6 @@ use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
 
-/// the checked desired file the machine's own service runs on, linked by the nix module
 const DESIRED: &str = "/etc/norn/desired.json";
 const STATE: &str = "/var/lib/norn";
 
@@ -79,7 +78,6 @@ fn main() -> ExitCode {
 
     let args = match Args::try_parse() {
         Ok(args) => args,
-        // converge runs during activation, where any exit but 0 fails a unit
         Err(error)
             if std::env::args().nth(1).as_deref() == Some("converge") && error.use_stderr() =>
         {

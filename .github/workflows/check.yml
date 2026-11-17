@@ -10,7 +10,6 @@ on:
         type: boolean
         default: true
 
-# Supersede only PR runs; a release run must finish its checks.
 concurrency:
   group: check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -37,13 +36,10 @@ jobs:
           fi
           python3 .github/scripts/version.py commits --base "$BASE_SHA" --head "$HEAD_SHA"
 
-  # Every system a fleet machine runs. The module checks build the package too, since a
-  # machine's desired file goes through `norn check`, so every system runs every check.
   nix:
     name: nix ${{ matrix.system }}
     if: github.event_name == 'pull_request' || inputs.nix
     runs-on: ${{ matrix.runner }}
-    # a hung check would otherwise hold the runner for GitHub's six-hour limit
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -62,9 +58,7 @@ jobs:
           nix_conf: |
             substituters = https://cache.nixos.org/ https://cache.r3dlust.com
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
-            # nix builds one derivation at a time unless told otherwise
             max-jobs = auto
-      # The Rust dependency build that release.yml saved on main, when it matches exactly.
       - name: Locate the Rust dependency build
         id: deps
         run: .github/scripts/deps-cache locate >> "$GITHUB_OUTPUT"
@@ -79,10 +73,6 @@ jobs:
       - if: steps.deps-cache.outputs.hit-primary-key == 'true'
         run: .github/scripts/deps-cache import "${{ steps.deps.outputs.path }}"
       - run: nix flake check --print-build-logs
-      # Records the tree that passed, so the release run of the same tree on main can reuse
-      # this check (see .github/scripts/checked-tree). On a pull request this is the merge
-      # of the head into the base. The run must succeed as a whole, every system included,
-      # before a release reuses it.
       - name: Record the checked tree
         id: tree
         if: github.event_name == 'pull_request' && matrix.system == 'x86_64-linux'

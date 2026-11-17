@@ -42,7 +42,6 @@ fn verbs(plan: &Plan<Dns>) -> Vec<&'static str> {
     plan.steps.iter().map(Step::verb).collect()
 }
 
-/// every write a plan holds is one `machine` may make
 fn assert_writes_only_its_own(machine: &str, plan: &Plan<Dns>) {
     let owners = owners(machine);
     for step in plan.steps.iter().chain(&plan.withheld) {

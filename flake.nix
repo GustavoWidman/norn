@@ -49,8 +49,6 @@
             ...
           }:
           let
-            # nixpkgs' stable rust, which cache.nixos.org serves ready to run, for
-            # builds, checks and the devshell alike
             craneLib = crane.mkLib pkgs;
             norn = pkgs.callPackage ./nix/package.nix { inherit craneLib; };
           in

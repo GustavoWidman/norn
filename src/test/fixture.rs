@@ -1,5 +1,3 @@
-//! synthetic zones and the declarations of the two machines that serve them
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -23,7 +21,6 @@ pub(crate) fn zone(name: &str) -> Zone {
 
 static SERIAL: AtomicU64 = AtomicU64::new(1);
 
-/// a record as cloudflare would report it
 #[derive(Clone)]
 pub(crate) struct Wire {
     pub kind: &'static str,
@@ -73,7 +70,6 @@ impl Wire {
         self.comment(&dns::mark(owner))
     }
 
-    /// as a listing reports it, with a fresh id that sorts after every earlier one
     pub fn live(&self) -> Live<Dns> {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let created = DateTime::<Utc>::UNIX_EPOCH + TimeDelta::seconds(serial as i64);
@@ -92,7 +88,6 @@ impl Wire {
         .expect("fixture names parse")
     }
 
-    /// the record's fields as cloudflare's json spells them
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "type": self.kind,
@@ -109,7 +104,6 @@ impl Wire {
         })
     }
 
-    /// what cloudflare stores for a record norn writes whole
     pub fn written(record: &Record, owner: &Owner) -> Self {
         let reach = record.data.reach();
         Wire {
@@ -133,7 +127,6 @@ impl Wire {
     }
 }
 
-/// a declaration, as the desired file would hold it
 pub(crate) fn want(owner: &Owner, kind: &str, name: &str, content: &str) -> Want<Dns> {
     declare(owner, kind, name, content, None, Ttl::Auto, None)
 }
@@ -168,7 +161,6 @@ pub(crate) fn declare(
     }
 }
 
-/// the live state after carrying `steps` out, as a later listing reports it
 pub(crate) fn apply(live: Vec<Live<Dns>>, steps: &[Step<Dns>]) -> Vec<Live<Dns>> {
     let mut live = live;
     for step in steps {
@@ -198,8 +190,6 @@ pub(crate) fn apply(live: Vec<Live<Dns>>, steps: &[Step<Dns>]) -> Vec<Live<Dns>>
     live
 }
 
-/// three zones shaped like a small fleet's: two machines' sites, mail, ACME
-/// challenges, a commented dummy and Email Routing records
 pub(crate) fn baseline() -> Vec<(Zone, Vec<Live<Dns>>)> {
     baseline_records()
         .into_iter()
@@ -207,7 +197,6 @@ pub(crate) fn baseline() -> Vec<(Zone, Vec<Live<Dns>>)> {
         .collect()
 }
 
-/// [baseline] as cloudflare stores it
 pub(crate) fn baseline_records() -> Vec<(&'static str, Vec<Wire>)> {
     let net = vec![
         wire("A", "blog.example.net", "192.0.2.20").proxied(),
@@ -294,8 +283,6 @@ pub(crate) fn dkim() -> String {
     "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC".repeat(5)
 }
 
-/// what web-1 serves: a cache, its bucket, a dashboard, and a game server's
-/// apex on its second address
 pub(crate) fn web_1() -> Vec<Want<Dns>> {
     let me = host(WEB_1);
     vec![
@@ -307,7 +294,6 @@ pub(crate) fn web_1() -> Vec<Want<Dns>> {
     ]
 }
 
-/// what web-2 serves: two sites, mail, and a handful of services
 pub(crate) fn web_2() -> Vec<Want<Dns>> {
     let me = host(WEB_2);
     let mut wants = vec![

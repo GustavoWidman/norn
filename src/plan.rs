@@ -1,7 +1,3 @@
-//! the one place that decides what to write, for every kind. pure: live
-//! state and declarations in, a [Plan] out, so the whole policy is tested
-//! against recorded cloudflare state without a network.
-
 use std::collections::BTreeMap;
 
 use crate::{
@@ -9,18 +5,12 @@ use crate::{
     model::{Owner, Owners},
 };
 
-/// the most deletes one run carries out. a render that empties a desired
-/// file then costs a handful of records, and the rest wait as withheld.
 pub(crate) const MAX_DELETES: usize = 10;
 
-/// what becomes of a live object once the plan is applied
 #[derive(Clone, PartialEq, Debug)]
 enum Fate {
-    /// nobody here writes it
     Open,
-    /// `owner`'s, as it already is
     Kept(Owner),
-    /// `owner`'s after a step: adopted, updated, or a withheld delete
     Written(Owner),
     Deleted,
 }
@@ -34,18 +24,6 @@ impl Fate {
     }
 }
 
-/// plans one scope. `deletes_left` is what remains of the run's delete cap,
-/// shared by every scope of the run; deletes past it are withheld.
-///
-/// invariants, each a test in `crate::test::plan`:
-/// - an update or delete only ever names an object marked by one of `owners`;
-/// - an adopt only ever names an unannotated unmarked object whose value
-///   equals the declaration;
-/// - a create never lands in a slot holding an object this run does not own,
-///   nor beside an object its key excludes;
-/// - planning the state that applying this plan leaves yields no steps;
-/// - the result does not depend on the order of `wants` or `live`, so every
-///   machine on one revision plans the same writes for the fleet's objects.
 pub(crate) fn plan<K: Kind>(
     owners: &Owners,
     wants: Vec<Want<K>>,
@@ -101,9 +79,6 @@ pub(crate) fn plan<K: Kind>(
             .unwrap_or_default();
         mine.sort_by(|&a, &b| K::identity(value(a)).cmp(&K::identity(value(b))));
 
-        // exact identities first: kept, or rewritten in place when another
-        // attribute moved. the oldest of duplicates is matched, so every
-        // machine deletes the same younger copies.
         let mut unmatched = Vec::new();
         for want in wanted {
             let identity = K::identity(&want);
@@ -128,8 +103,6 @@ pub(crate) fn plan<K: Kind>(
             }
         }
 
-        // an object of the same identity this owner does not hold: adopt it
-        // when it is an unannotated unmarked twin, otherwise wait for a person
         let mut free = Vec::new();
         for want in unmatched {
             let identity = K::identity(&want);
@@ -177,8 +150,6 @@ pub(crate) fn plan<K: Kind>(
             });
         }
 
-        // what is left pairs up in identity order: a changed address is one
-        // rewrite, never a window without a record
         let mut leftover = mine.into_iter();
         for want in free {
             match leftover.next() {

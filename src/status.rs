@@ -1,11 +1,3 @@
-//! `state_dir/status.json`: the last run's outcome, so "persistently
-//! failing" is observable from outside (`norn status`, and later a
-//! notifier). written only by `converge`.
-//!
-//! the planner never reads this file. cloudflare stays the only state a run
-//! acts on; this is a log of runs, not a record of objects, and deleting it
-//! loses only the streak.
-
 use std::{fmt, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
@@ -18,42 +10,28 @@ use crate::{
     run::{Line, What},
 };
 
-/// how many lines of what did not apply a status keeps
 const LINES: usize = 20;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Status {
     pub finished: DateTime<Utc>,
-    /// the desired file the run acted on: which revision this is about
     pub desired: Option<String>,
     pub mode: Option<String>,
     pub health: Health,
     pub counts: Counts,
-    /// when the current streak of troubled runs began; `None` while runs
-    /// converge or are only held by the mode
     pub troubled_since: Option<DateTime<Utc>>,
-    /// fleet objects this run rewrote that the previous run rewrote too:
-    /// another machine keeps writing a different value, typically one stuck
-    /// on another revision
     pub contested: Vec<String>,
-    /// fleet objects this run rewrote, for the next run's `contested`
     pub rewrote: Vec<String>,
-    /// what did not apply and why, at most 20 lines
     pub lines: Vec<String>,
 }
 
-/// worst first
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Health {
-    /// a read or a write failed, the deadline passed, or the run crashed
     Failing,
-    /// something declared waits for a person (see `lines`)
     Blocked,
-    /// the run did not start: no token yet, or another run held the lock
     Skipped,
-    /// steps exist that the mode does not carry out; expected while rolling out
     Held,
     Converged,
 }
@@ -69,7 +47,6 @@ impl Health {
         }
     }
 
-    /// whether this run counts toward a streak someone should hear about
     fn troubled(self) -> bool {
         matches!(self, Health::Failing | Health::Blocked | Health::Skipped)
     }
@@ -106,7 +83,6 @@ impl fmt::Display for Counts {
     }
 }
 
-/// one run's outcome, before it is folded into the previous status
 pub(crate) struct Summary {
     pub health: Health,
     pub counts: Counts,
@@ -117,7 +93,6 @@ pub(crate) struct Summary {
 }
 
 impl Summary {
-    /// a run that ended before it planned anything
     pub fn problem(health: Health, message: String) -> Self {
         Self {
             health,
@@ -176,7 +151,6 @@ impl Summary {
         } else {
             Health::Converged
         };
-        // failures first: they are what a person reads this file for
         shown.sort_by_key(|line| !line.starts_with("failed") && !line.starts_with("unread"));
         shown.truncate(LINES);
         Self {
@@ -196,8 +170,6 @@ impl Summary {
     }
 }
 
-/// folds this run's summary into the previous status and replaces the file
-/// atomically (write a sibling, rename). a failure to write is logged, never raised.
 pub(crate) fn record(state_dir: &Path, summary: &Summary) {
     let previous = read(state_dir).ok();
     let now = Utc::now();
@@ -252,7 +224,6 @@ pub(crate) fn read(state_dir: &Path) -> eyre::Result<Status> {
 }
 
 impl Status {
-    /// false once the machine has been troubled, or has not run, for longer than `stale`
     pub fn fresh(&self, now: DateTime<Utc>, stale: Duration) -> bool {
         let older = |at: DateTime<Utc>| (now - at).to_std().is_ok_and(|age| age > stale);
         !older(self.finished) && !self.troubled_since.is_some_and(older)

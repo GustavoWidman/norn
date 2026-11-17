@@ -1,11 +1,3 @@
-# options shared by the nixos and darwin modules: what a machine declares
-# under `cloudflare`, how the service runs under `services.norn`, and the
-# checked desired file the service runs on.
-#
-# nix collects and renders; every value rule (name spelling, zones, content
-# per type) lives in `norn check`, which the desired file's derivation
-# runs. the rules across machines are assertions over every machine's
-# `cloudflare.claims`, which the fleet passes in as `services.norn.peers`.
 { self }:
 {
   config,
@@ -45,9 +37,6 @@ let
       };
     };
 
-  # every record at one name. `address` is what A and AAAA point at when
-  # they name nothing: this machine's for its own records, nothing for the
-  # fleet's, which must not depend on which machine evaluates them.
   recordSet =
     address:
     types.submodule {
@@ -87,7 +76,6 @@ let
           default = [ ];
         };
         txt = mkOption {
-          # a bare string is a text with an automatic ttl
           type = types.listOf (
             types.coercedTo types.str (text: { inherit text; }) (
               types.submodule {
@@ -103,7 +91,6 @@ let
       };
     };
 
-  # one row per name, type and content, as the desired file carries them
   rows =
     sets:
     lib.concatLists (
@@ -120,7 +107,6 @@ let
             }
             // fields;
           reach = sub: { inherit (sub) proxied ttl; };
-          # no address at all renders one empty address, which `norn check` refuses
           addressed =
             type: sub:
             lib.optionals (sub != null) (
@@ -153,8 +139,8 @@ let
 
   keys = sets: lib.unique (map (row: "${row.name} ${row.type}") (rows sets));
 
-  # sorted, so the digest does not depend on the order modules were
-  # imported in, which differs between nixos and darwin machines
+  # nixos and nix-darwin merge the same modules in different orders, so the
+  # digest every machine compares is over sorted lists
   fleetSection = {
     zones = lib.sort lib.lessThan (lib.unique cf.zones);
     dns = lib.sort (a: b: builtins.toJSON a < builtins.toJSON b) (rows cf.fleet.dns);
@@ -173,7 +159,6 @@ let
     ${lib.getExe cfg.package} check --in "$rawPath" --out "$out"
   '';
 
-  # the cross-machine rules, over every enabled machine's claims
   fleetAssertions =
     let
       peers = lib.filterAttrs (_: claims: claims.enabled) cfg.peers;
@@ -383,7 +368,6 @@ in
       assertions = fleetAssertions;
 
       environment.etc."norn/desired.json".source = desired;
-      # `sudo norn report` and `norn status` find this machine's files
       environment.systemPackages = [
         (pkgs.symlinkJoin {
           name = "norn-${cfg.package.version or "cli"}";
@@ -399,7 +383,6 @@ in
       ];
     })
 
-    # records declared where nothing applies them would never reach Cloudflare
     (lib.mkIf (!cfg.enable) {
       assertions = [
         {

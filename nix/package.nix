@@ -17,10 +17,7 @@ let
 
   cargoVendorDir = craneLib.vendorCargoDeps args;
 
-  # the dependencies build against norn without its version, so a release,
-  # which bumps only that, keeps the dependency build CI cached for the last
   locked = builtins.readFile ../Cargo.lock;
-  # the packages the lock names no source for: norn itself
   workspace = builtins.filter (package: !(package ? source)) (builtins.fromTOML locked).package;
   entry = name: version: ''
     name = "${name}"
@@ -69,7 +66,6 @@ craneLib.buildPackage (
   // {
     inherit cargoArtifacts;
 
-    # the tests run once, in `passthru.checks.test`
     doCheck = false;
 
     passthru.checks = {

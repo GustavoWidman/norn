@@ -1,6 +1,3 @@
-//! a run: read the desired file, take the lock, build exactly one client of
-//! the kind the mode allows, visit every kind in order, record what happened.
-
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -20,12 +17,10 @@ use crate::{
     plan::{MAX_DELETES, plan},
 };
 
-/// how long a run may take, and how long it waits for another run
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
     /// the whole run's budget against cloudflare
     pub deadline: Duration,
-    /// one request's budget
     pub per_request: Duration,
     /// how long a run waits for another run of this machine to finish;
     /// past it, the run leaves the work to the next one
@@ -33,7 +28,6 @@ pub struct Timing {
 }
 
 impl Timing {
-    /// past this the process exits 0 whatever it is doing
     fn watchdog(&self) -> Duration {
         self.lock_wait + self.deadline + Duration::from_secs(5)
     }
@@ -43,7 +37,6 @@ impl Timing {
     }
 }
 
-/// where requests go: cloudflare, or a test's stand-in for it
 #[derive(Clone)]
 pub(crate) enum Cloudflare {
     Https,
@@ -244,8 +237,7 @@ pub(crate) fn report_with(
     ))
 }
 
-/// judges a rendered desired file and writes its canonical form; the nix
-/// module runs this while building the system
+/// judges a rendered desired file and writes its canonical form
 pub fn check(input: &Path, output: Option<&Path>) -> Result<(), Problems> {
     let desired = Desired::read(input)?;
     if let Some(output) = output {
@@ -268,36 +260,26 @@ pub fn status(state_dir: &Path, stale: Duration) -> eyre::Result<bool> {
     Ok(status.fresh(chrono::Utc::now(), stale))
 }
 
-/// one line of what a run did or would do, kind-erased for the report, the
-/// log and the status file
 #[derive(Clone, Debug)]
 pub(crate) struct Line {
     pub kind: &'static str,
     pub scope: String,
     pub what: What,
     pub owner: Option<Owner>,
-    /// `A      cache.example.com`
     pub key: String,
-    /// `192.0.2.10  dns only`, or `old -> new` for an update
     pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum What {
-    /// a step this run did not carry out: report never does, adopt holds the rest
     Planned(&'static str),
     Applied(&'static str),
     Failed(&'static str, String),
-    /// a delete past the run's cap
     Withheld,
     Blocked(String),
-    /// the scope could not be read; its declarations were neither applied nor judged
     Unread(String),
     Kept,
-    Untouched {
-        annotated: bool,
-    },
-    /// another owner's object, an unreadable mark, or a shape norn does not model
+    Untouched { annotated: bool },
     Foreign(String),
 }
 
@@ -338,7 +320,6 @@ impl Line {
         Self::of::<K>(scope, what, None, &live.key, value)
     }
 
-    /// `dns record example.com: adopt web-1 A      cache.example.com 192.0.2.10  dns only`
     pub fn subject(&self) -> String {
         let owner = self
             .owner
@@ -424,12 +405,10 @@ fn shown<K: Kind>(live: &Live<K>) -> String {
         .unwrap_or_else(|| "(a shape norn does not model)".into())
 }
 
-/// what a run does with each kind's plan
 trait Act {
     fn on<K: Kind>(&mut self, planned: Planned<K>);
 }
 
-/// a kind's plan over all its scopes
 struct Planned<K: Kind> {
     scopes: Vec<Scoped<K>>,
 }
@@ -446,7 +425,6 @@ enum Scoped<K: Kind> {
     },
 }
 
-/// keeps plans to print them. holds no client, so it cannot write.
 #[derive(Default)]
 struct Show {
     lines: Vec<Line>,
@@ -467,9 +445,6 @@ impl Act for Show {
     }
 }
 
-/// carries out what the ladder permits, in plan order, and records each
-/// step. a failed step does not stop the next; one that depended on a failed
-/// one fails too, and a later run retries both.
 struct Apply<'a> {
     api: &'a Api<Write>,
     ladder: Ladder,
@@ -509,9 +484,6 @@ fn unread<K: Kind>(scope: &K::Scope, error: &ApiError) -> Line {
     }
 }
 
-/// every kind, in dependency order: a kind whose values name another kind's
-/// objects comes after it. the destructuring is exhaustive, so a kind added
-/// to [Wants] does not compile until it is visited here.
 fn visit<C: Capability>(api: &Api<C>, desired: &Desired, act: &mut impl Act) {
     let owners = desired.owners();
     let mut deletes_left = MAX_DELETES;
@@ -526,9 +498,6 @@ fn visit<C: Capability>(api: &Api<C>, desired: &Desired, act: &mut impl Act) {
     ));
 }
 
-/// reads each scope and plans it; a scope that cannot be read is reported,
-/// and the other scopes go on. every scope is read, declared in or not: an
-/// owner whose last object in a scope was removed still has a delete there.
 fn plan_kind<K: Kind, C: Capability>(
     api: &Api<C>,
     owners: &Owners,
@@ -554,9 +523,6 @@ fn plan_kind<K: Kind, C: Capability>(
     Planned { scopes }
 }
 
-/// one run at a time on a machine: the activation unit and the sweep unit
-/// share `state_dir/lock`. the lock goes with the file descriptor, so a run
-/// killed midway releases it.
 pub(crate) struct Lock {
     _file: File,
 }

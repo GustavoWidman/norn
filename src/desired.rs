@@ -1,13 +1,3 @@
-//! the desired file: one machine's declarations, rendered by its nix module
-//! and judged by [Desired::parse], the only parser of declared values.
-//!
-//! the module runs `norn check` on the rendered file while building the
-//! system and installs the canonical form `check` writes, which the service
-//! later reads with the same parser. so a file that built cannot fail to
-//! parse at run time, and no value rule is restated in nix. the rules across
-//! machines (one owner per name and type, one fleet section) are nix
-//! assertions over every machine's claims, which this file cannot see.
-
 use std::{collections::BTreeMap, fmt, path::Path};
 
 use crate::{
@@ -16,11 +6,8 @@ use crate::{
     model::{Fqdn, HostName, Owner, Owners, Zones},
 };
 
-/// what the service does with its plan. the fleet rolls out report, then
-/// adopt for one deploy, then enforce.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
-    /// read, plan, print: a run builds only a read-only client
     Report,
     Write(Ladder),
 }
@@ -35,25 +22,19 @@ impl Mode {
     }
 }
 
-/// one machine's judged declarations
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Desired {
     pub host: HostName,
     pub mode: Mode,
     pub zones: Zones,
-    /// what only this machine writes, in slot order
     pub host_owned: Vec<Record>,
-    /// what every machine that runs norn writes, identically
     pub fleet_owned: Vec<Record>,
 }
 
-/// one run's declarations, kind by kind. the run destructures it
-/// exhaustively, so a kind added here does not compile until the run visits it.
 pub(crate) struct Wants {
     pub dns: Vec<Want<Dns>>,
 }
 
-/// a finding in the desired file, worded for whoever edits the nix
 #[derive(Debug, PartialEq)]
 pub(crate) struct Problem {
     pub subject: String,
@@ -89,7 +70,6 @@ impl Desired {
         Self::parse(&bytes)
     }
 
-    /// every rule at once, so a broken declaration reports all its problems in one build
     pub fn parse(bytes: &[u8]) -> Result<Self, Problems> {
         let document: document::Document = serde_json::from_slice(bytes).map_err(|error| {
             Problems(vec![Problem {
@@ -182,8 +162,6 @@ impl Desired {
         }
     }
 
-    /// the same declarations in one fixed spelling and order, so the
-    /// installed file changes only when what it declares does
     pub fn canonical(&self) -> String {
         let section = |records: &[Record]| document::Objects {
             dns: records.iter().map(document::Record::from).collect(),
@@ -201,12 +179,10 @@ impl Desired {
         text
     }
 
-    /// the marks this machine's runs act for
     pub fn owners(&self) -> Owners {
         Owners::machine(self.host.clone())
     }
 
-    /// what this machine's runs want, kind by kind
     pub fn wants(&self) -> Wants {
         Wants { dns: self.dns() }
     }
@@ -232,8 +208,6 @@ impl Desired {
     }
 }
 
-/// the rules across this file's records: a name and type has one owner, a
-/// record is declared once, and a CNAME shares its name with nothing
 fn collisions(host_owned: &[Record], fleet_owned: &[Record]) -> Vec<(String, String)> {
     let mut found = Vec::new();
     let mut slots: BTreeMap<Slot, Vec<(&str, &Record)>> = BTreeMap::new();
@@ -294,9 +268,6 @@ fn collisions(host_owned: &[Record], fleet_owned: &[Record]) -> Vec<(String, Str
     found
 }
 
-/// the file as nix writes it. `deny_unknown_fields` everywhere: a field the
-/// module renders and this binary does not know fails the build, so the two
-/// cannot drift apart silently.
 mod document {
     use serde::{Deserialize, Serialize};
 
@@ -305,7 +276,6 @@ mod document {
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     pub struct Document {
-        /// 1; bumped when the shape changes incompatibly
         pub schema: u32,
         pub host: String,
         pub mode: String,
@@ -314,7 +284,6 @@ mod document {
         pub fleet_owned: Objects,
     }
 
-    /// one field per kind
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     pub struct Objects {
@@ -333,7 +302,6 @@ mod document {
         pub priority: Option<u16>,
     }
 
-    /// `"auto"` or seconds
     #[derive(Deserialize, Serialize)]
     #[serde(untagged)]
     pub enum DeclaredTtl {

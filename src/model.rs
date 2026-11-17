@@ -1,11 +1,5 @@
-//! names and owners every kind shares. each is parsed once, at the desired
-//! file or the wire boundary, and trusted everywhere inside.
-
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
-/// a fleet machine's name: `[a-z0-9-]{1,63}`, not starting or ending with
-/// `-`, and never `fleet`, which names the fleet's own mark. so the longest
-/// mark, `norn v1 host=<host>`, is 76 bytes, inside the 100-byte comment.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct HostName(String);
 
@@ -40,8 +34,6 @@ impl fmt::Display for HostName {
     }
 }
 
-/// who may write an object: one machine, or every machine that runs norn,
-/// always with the same value for the same revision
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum Owner {
     Fleet,
@@ -57,8 +49,6 @@ impl fmt::Display for Owner {
     }
 }
 
-/// the marks one run acts for: its machine's and the fleet's. a run never
-/// adopts, updates or deletes for an owner outside this set.
 #[derive(Clone, Debug)]
 pub(crate) struct Owners(BTreeSet<Owner>);
 
@@ -72,18 +62,10 @@ impl Owners {
     }
 }
 
-/// a domain name in cloudflare's spelling: lowercase ascii, no trailing dot,
-/// at most 253 bytes, labels of 1..=63 bytes from `[a-z0-9_-]` that neither
-/// start nor end with `-`, and `*` allowed as the whole leftmost label.
-///
-/// it orders by reversed labels (`com < example.com < cache.example.com <
-/// s3.cache.example.com`), so anything keyed by name groups by zone and subtree.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Fqdn(String);
 
 impl Fqdn {
-    /// a declared name must already be canonical. nothing is rewritten, so
-    /// the name the build compares across machines is the name written.
     pub fn parse(name: &str) -> Result<Self, String> {
         if name.is_empty() || name.len() > 253 {
             return Err(format!("{name:?} is not 1 to 253 bytes long"));
@@ -111,14 +93,11 @@ impl Fqdn {
         Ok(Self(name.to_owned()))
     }
 
-    /// a name cloudflare reports, folded to the canonical spelling; `None`
-    /// when it is not a domain name norn can spell
     pub fn from_live(name: &str) -> Option<Self> {
         let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
         Self::parse(&name).ok()
     }
 
-    /// `self` is `zone` or ends in `.` + `zone`
     pub fn is_within(&self, zone: &Zone) -> bool {
         let zone = zone.name().as_str();
         self.0 == zone
@@ -151,7 +130,6 @@ impl fmt::Display for Fqdn {
     }
 }
 
-/// a zone the fleet manages, by name; its cloudflare id is learned per run
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct Zone(Fqdn);
 
@@ -175,8 +153,6 @@ impl fmt::Display for Zone {
     }
 }
 
-/// the fleet's zones. a name belongs to the longest zone it is within, so a
-/// delegated `sub.example.com` zone, if one is ever added, takes its own names.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Zones(BTreeSet<Zone>);
 

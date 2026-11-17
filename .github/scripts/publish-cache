@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Uploads a built norn to the cache and pins it, so the cache's garbage collection
-# keeps it: norn-<system> names the newest build, and three rotating revision pins
-# keep the builds before it for hosts that have not updated yet.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -22,8 +19,6 @@ pin_name="norn-$1"
 store_path=$2
 auth=(--server-url "$NIKS3_SERVER_URL" --auth-token-script "$NIKS3_AUTH_TOKEN_SCRIPT")
 
-# Reuse a slot on retries, otherwise replace the oldest of three revision pins. Fixed
-# names bound retention without granting CI permission to delete pins.
 pins=$("$NIKS3_BIN" pins list "${auth[@]}" --json)
 revision_pin=$(jq -er --arg prefix "$pin_name" --arg path "$store_path" '
   [range(1; 4) | "\($prefix).revision-\(.)"] as $slots
@@ -34,7 +29,6 @@ revision_pin=$(jq -er --arg prefix "$pin_name" --arg path "$store_path" '
     // ($revisions | min_by(.updated_at) | .name)
 ' <<< "$pins")
 
-# Upload before moving the public pin.
 "$NIKS3_BIN" push "${auth[@]}" --max-concurrent-uploads 2 --pin "$revision_pin" "$store_path"
 "$NIKS3_BIN" pins create "${auth[@]}" "$pin_name" "$store_path"
 nix path-info --refresh --store "$NIKS3_SERVER_URL" "$store_path"
