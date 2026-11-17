@@ -1,12 +1,14 @@
 use crate::{
     dns::{Dns, Ttl},
+    gate::Deletes,
     kind::{Live, Ownership, Plan, Step, Want, Why, Withhold},
-    model::Zone,
+    model::{Owner, Revision, Zone},
     plan::plan,
 };
 
 use super::fixture::{
-    WEB_1, WEB_2, apply, baseline, declare, host, mx, proxied, want, web_1, web_2, wire, zone,
+    WEB_1, WEB_2, apply, baseline, declare, host, mx, proxied, shared, want, web_1, web_2, wire,
+    zone,
 };
 
 fn plan_zone(machine: &str, wants: &[Want<Dns>], zone: &Zone, live: Vec<Live<Dns>>) -> Plan<Dns> {
@@ -15,8 +17,16 @@ fn plan_zone(machine: &str, wants: &[Want<Dns>], zone: &Zone, live: Vec<Live<Dns
         .filter(|want| want.scope == *zone)
         .cloned()
         .collect();
-    plan(&host(machine), wants, live, None)
+    plan(
+        &Owner::Host(host(machine)),
+        wants,
+        live,
+        None,
+        Deletes::Never,
+    )
 }
+
+const REVISION: Revision = Revision(1);
 
 fn lines(plan: &Plan<Dns>) -> Vec<String> {
     plan.steps
@@ -53,12 +63,13 @@ fn assert_writes_only_its_own(machine: &str, plan: &Plan<Dns>) {
                 );
             }
             Step::Update { live, .. } | Step::Delete { live, .. } => match &live.ownership {
-                Ownership::Marked(owner) => assert_eq!(*owner, me, "{step:?}"),
+                Ownership::Host(owner) => assert_eq!(*owner, me, "{step:?}"),
                 other => panic!("{other:?} in {step:?}"),
             },
             Step::Create { .. } => {}
+            Step::Retire { .. } | Step::Restore { .. } => panic!("{step:?}"),
         }
-        assert_eq!(*step.owner(), me);
+        assert_eq!(*step.owner(), Owner::Host(me.clone()));
     }
 }
 
@@ -111,9 +122,9 @@ fn the_baseline_plans_23_adopts_and_leaves_9_untouched() {
 fn a_second_plan_over_the_adopted_baseline_has_no_steps() {
     for (zone, live) in baseline() {
         let first = plan_zone(WEB_1, &web_1(), &zone, live.clone());
-        let live = apply(live, &first.steps);
+        let live = apply(live, &first.steps, REVISION);
         let second = plan_zone(WEB_2, &web_2(), &zone, live.clone());
-        let live = apply(live, &second.steps);
+        let live = apply(live, &second.steps, REVISION);
         for (machine, wants) in [(WEB_1, web_1()), (WEB_2, web_2())] {
             let again = plan_zone(machine, &wants, &zone, live.clone());
             assert!(again.steps.is_empty(), "{zone}: {:?}", lines(&again));
@@ -165,7 +176,7 @@ fn applying_any_plan_converges_in_one_run() {
     let first = plan_zone(WEB_1, &wants, &com, live.clone());
     assert_writes_only_its_own(WEB_1, &first);
     assert!(first.blocked.is_empty(), "{:?}", first.blocked);
-    let live = apply(live, &first.steps);
+    let live = apply(live, &first.steps, REVISION);
     let second = plan_zone(WEB_1, &wants, &com, live);
     assert!(second.steps.is_empty(), "{:?}", lines(&second));
     assert_eq!(second.kept.len(), wants.len());
@@ -212,7 +223,7 @@ fn nothing_unmarked_foreign_or_unreadable_is_ever_written() {
             ("example.com".into(), Why::Occupied),
             ("a.example.com".into(), Why::Occupied),
             ("b.example.com".into(), Why::Annotated),
-            ("c.example.com".into(), Why::Owned(other)),
+            ("c.example.com".into(), Why::Owned(Owner::Host(other))),
             ("d.example.com".into(), Why::Unreadable),
             ("e.example.com".into(), Why::Differs),
             ("f.example.com".into(), Why::Excludes),
@@ -234,7 +245,13 @@ fn a_tripped_breaker_withholds_every_delete_and_what_needs_one() {
     ];
     let wants = vec![want(&me, "CNAME", "app.example.com", "example.com")];
     let breaker = Withhold::Breaker { planned: 2, max: 1 };
-    let plan = plan(&me, wants, live, Some(&breaker));
+    let plan = plan(
+        &Owner::Host(me),
+        wants,
+        live,
+        Some(&breaker),
+        Deletes::Never,
+    );
     assert!(plan.steps.is_empty(), "{:?}", lines(&plan));
     assert_eq!(plan.withheld.len(), 2);
     assert!(plan.withheld.iter().all(|withheld| withheld.why == breaker));
@@ -442,4 +459,151 @@ fn among_duplicates_the_exact_match_is_kept() {
         ["delete web-1 A      app.example.com 192.0.2.1  dns only  ttl 300"]
     );
     assert_eq!(plan.kept.len(), 1);
+}
+
+#[test]
+fn a_machine_and_the_fleet_never_touch_each_others_records() {
+    let me = host(WEB_1);
+    let other = host(WEB_2);
+    let live: Vec<Live<Dns>> = [
+        wire("A", "mine.example.com", "192.0.2.1").marked(&me),
+        wire("A", "theirs.example.com", "192.0.2.2").marked(&other),
+        wire("A", "shared.example.com", "192.0.2.3").shared(1),
+        wire("A", "gone.example.com", "192.0.2.4").retiring(1),
+    ]
+    .iter()
+    .map(|record| record.live())
+    .collect();
+    let host_wants = vec![want(&me, "A", "shared.example.com", "192.0.2.3")];
+    let fleet_wants = vec![
+        shared("A", "mine.example.com", "192.0.2.1"),
+        shared("A", "theirs.example.com", "192.0.2.2"),
+    ];
+    let everything = Deletes::UpTo(Revision(u64::MAX));
+
+    let mine = plan(
+        &Owner::Host(me.clone()),
+        host_wants,
+        live.clone(),
+        None,
+        everything,
+    );
+    assert_eq!(
+        lines(&mine),
+        ["delete web-1 A      mine.example.com 192.0.2.1  dns only"]
+    );
+    assert_eq!(mine.blocked[0].why, Why::Owned(Owner::Fleet));
+
+    let fleet = plan(&Owner::Fleet, fleet_wants, live, None, everything);
+    assert_eq!(
+        lines(&fleet),
+        [
+            "retire fleet A      shared.example.com 192.0.2.3  dns only",
+            "delete fleet A      gone.example.com 192.0.2.4  dns only",
+        ]
+    );
+    let why: Vec<Why> = fleet
+        .blocked
+        .iter()
+        .map(|blocked| blocked.why.clone())
+        .collect();
+    assert_eq!(
+        why,
+        [Why::Owned(Owner::Host(me)), Why::Owned(Owner::Host(other))]
+    );
+}
+
+#[test]
+fn a_retiring_record_is_deleted_only_up_to_the_rollout() {
+    let live = vec![
+        wire("A", "old.example.com", "192.0.2.1").retiring(1).live(),
+        wire("A", "new.example.com", "192.0.2.2").retiring(2).live(),
+    ];
+    let deleted = |deletes| {
+        let plan = plan(&Owner::Fleet, vec![], live.clone(), None, deletes);
+        let waiting: Vec<Withhold> = plan.withheld.iter().map(|w| w.why.clone()).collect();
+        (lines(&plan).len(), waiting)
+    };
+    assert_eq!(
+        deleted(Deletes::Never),
+        (
+            0,
+            vec![
+                Withhold::Retiring {
+                    dropped: Revision(2),
+                    deletes: Deletes::Never
+                },
+                Withhold::Retiring {
+                    dropped: Revision(1),
+                    deletes: Deletes::Never
+                }
+            ]
+        )
+    );
+    assert_eq!(
+        deleted(Deletes::UpTo(Revision(1))),
+        (
+            1,
+            vec![Withhold::Retiring {
+                dropped: Revision(2),
+                deletes: Deletes::UpTo(Revision(1))
+            }]
+        )
+    );
+    assert_eq!(deleted(Deletes::UpTo(Revision(2))), (2, vec![]));
+}
+
+#[test]
+fn a_retiring_record_declared_again_is_restored_or_rewritten() {
+    let live = vec![
+        wire("A", "back.example.com", "192.0.2.1")
+            .retiring(1)
+            .live(),
+        wire("A", "moved.example.com", "192.0.2.1")
+            .retiring(1)
+            .live(),
+    ];
+    let wants = vec![
+        shared("A", "back.example.com", "192.0.2.1"),
+        shared("A", "moved.example.com", "192.0.2.2"),
+    ];
+    let first = plan(
+        &Owner::Fleet,
+        wants.clone(),
+        live.clone(),
+        None,
+        Deletes::Never,
+    );
+    assert_eq!(verbs(&first), ["restore", "update"]);
+    let live = apply(live, &first.steps, Revision(2));
+    let second = plan(&Owner::Fleet, wants, live, None, Deletes::Never);
+    assert!(second.steps.is_empty() && second.withheld.is_empty());
+    assert_eq!(second.kept.len(), 2);
+}
+
+#[test]
+fn a_cname_waits_beside_the_record_it_replaces_until_that_one_is_deleted() {
+    let live = vec![wire("A", "app.example.com", "192.0.2.1").shared(1).live()];
+    let wants = vec![shared("CNAME", "app.example.com", "example.com")];
+    let first = plan(&Owner::Fleet, wants.clone(), live, None, Deletes::Never);
+    assert_eq!(verbs(&first), ["retire"]);
+    assert_eq!(first.blocked[0].why, Why::Retiring);
+
+    let live = apply(
+        vec![first.steps[0].live().unwrap().clone()],
+        &first.steps,
+        Revision(2),
+    );
+    let waiting = plan(
+        &Owner::Fleet,
+        wants.clone(),
+        live.clone(),
+        None,
+        Deletes::UpTo(Revision(1)),
+    );
+    assert!(waiting.steps.is_empty());
+    assert_eq!(waiting.blocked[0].why, Why::Retiring);
+
+    let rolled_out = plan(&Owner::Fleet, wants, live, None, Deletes::UpTo(Revision(2)));
+    assert_eq!(verbs(&rolled_out), ["delete", "create"]);
 }

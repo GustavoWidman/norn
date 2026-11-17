@@ -9,10 +9,10 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::{
-    desired::{Desired, Mode},
-    dns::Record,
+    desired::{Desired, Fleet, Mode},
+    gate::RolloutFile,
     kind::{Ladder, Want},
-    model::{HostName, Zones},
+    model::{HostName, Owner, Revision, Zones},
     run::{Cloudflare, Lock, Timing, converge_with, owner_only, report_with},
     status::{self, Health},
 };
@@ -22,26 +22,39 @@ use super::{
     fixture::{WEB_1, WEB_2, baseline_records, host, proxied, want, web_1, web_2, wire},
 };
 
-struct Machine {
+pub(super) struct Machine {
     dir: TempDir,
     host: &'static str,
+    pub revision: Option<u64>,
+    pub rollout: Option<RolloutFile>,
 }
 
 impl Machine {
-    fn new(host: &'static str) -> Self {
+    pub fn new(host: &'static str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("token"), "test-token\n").unwrap();
-        Self { dir, host }
+        Self {
+            dir,
+            host,
+            revision: None,
+            rollout: None,
+        }
     }
 
     fn declare(&self, mode: Mode, wants: Vec<Want<crate::dns::Dns>>) -> PathBuf {
-        let records: Vec<Record> = wants.into_iter().map(|want| want.value).collect();
+        let (fleet, dns): (Vec<_>, Vec<_>) = wants
+            .into_iter()
+            .partition(|want| want.owner == Owner::Fleet);
         let zones = ["example.com", "example.net", "example.org"].map(String::from);
         let desired = Desired {
             host: HostName::parse(self.host).unwrap(),
             mode,
             zones: Zones::parse(&zones).unwrap(),
-            dns: records,
+            dns: dns.into_iter().map(|want| want.value).collect(),
+            fleet: Fleet {
+                revision: self.revision.map(Revision),
+                dns: fleet.into_iter().map(|want| want.value).collect(),
+            },
         };
         let raw = self.dir.path().join("raw.json");
         std::fs::write(&raw, desired.canonical()).unwrap();
@@ -50,15 +63,28 @@ impl Machine {
         path
     }
 
+    /// the deploy tool's word that the whole fleet runs `committed`, checked
+    /// `ago`
+    pub fn rolled_out(&mut self, committed: u64, ago: Duration) {
+        let path = self.dir.path().join("rollout.json");
+        let checked = chrono::Utc::now().timestamp() - ago.as_secs() as i64;
+        let rollout = json!({ "committed": committed, "checked": checked });
+        std::fs::write(&path, rollout.to_string()).unwrap();
+        self.rollout = Some(RolloutFile {
+            path,
+            max_age: Duration::from_secs(30 * 60),
+        });
+    }
+
+    pub fn state(&self) -> PathBuf {
+        self.dir.path().join("state")
+    }
+
     fn token(&self) -> PathBuf {
         self.dir.path().join("token")
     }
 
-    fn state(&self) -> PathBuf {
-        self.dir.path().join("state")
-    }
-
-    fn converge(
+    pub fn converge(
         &self,
         fake: &Arc<fake::Cloudflare>,
         mode: Mode,
@@ -82,10 +108,15 @@ impl Machine {
             &self.state(),
             timing(),
             max_deletes,
+            self.rollout.as_ref(),
         )
     }
 
-    fn report(&self, fake: &Arc<fake::Cloudflare>, wants: Vec<Want<crate::dns::Dns>>) -> String {
+    pub fn report(
+        &self,
+        fake: &Arc<fake::Cloudflare>,
+        wants: Vec<Want<crate::dns::Dns>>,
+    ) -> String {
         let desired = self.declare(Mode::Report, wants);
         let (text, complete) = report_with(
             &Cloudflare::Fake(fake.clone()),
@@ -93,6 +124,7 @@ impl Machine {
             Some(&self.token()),
             timing(),
             MAX_DELETES,
+            self.rollout.as_ref(),
             false,
         )
         .unwrap();
@@ -111,7 +143,7 @@ fn timing() -> Timing {
     }
 }
 
-fn cloudflare() -> Arc<fake::Cloudflare> {
+pub(super) fn cloudflare() -> Arc<fake::Cloudflare> {
     let fake = fake::Cloudflare::new(3);
     for (zone, records) in baseline_records() {
         for record in records {
@@ -121,8 +153,8 @@ fn cloudflare() -> Arc<fake::Cloudflare> {
     fake
 }
 
-const ADOPT: Mode = Mode::Write(Ladder::Adopt);
-const ENFORCE: Mode = Mode::Write(Ladder::Enforce);
+pub(super) const ADOPT: Mode = Mode::Write(Ladder::Adopt);
+pub(super) const ENFORCE: Mode = Mode::Write(Ladder::Enforce);
 
 #[test]
 fn report_reads_every_page_and_writes_nothing() {
@@ -131,8 +163,8 @@ fn report_reads_every_page_and_writes_nothing() {
     let two = Machine::new(WEB_2).report(&fake, web_2());
     assert!(fake.writes().is_empty(), "{:?}", fake.writes());
     assert!(one.contains("32 objects read"), "{one}");
-    assert!(one.contains("\n5 to adopt · 0 to update · 0 to delete · 0 to create · 0 withheld · 0 blocked · 27 untouched"), "{one}");
-    assert!(two.contains("\n18 to adopt · 0 to update · 0 to delete · 0 to create · 0 withheld · 0 blocked · 14 untouched"), "{two}");
+    assert!(one.contains("\n5 to adopt · 0 to update · 0 to delete · 0 to create · 0 to retire · 0 to restore · 0 held · 0 withheld · 0 blocked · 27 untouched"), "{one}");
+    assert!(two.contains("\n18 to adopt · 0 to update · 0 to delete · 0 to create · 0 to retire · 0 to restore · 0 held · 0 withheld · 0 blocked · 14 untouched"), "{two}");
     assert!(
         one.contains("untouched         A      status.example.com"),
         "{one}"
@@ -345,6 +377,7 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
             &one.state(),
             spent,
             MAX_DELETES,
+            None,
         )
     };
     assert_eq!(run(), Health::Failing);
@@ -378,6 +411,7 @@ fn a_missing_token_skips_the_run() {
         &one.state(),
         timing(),
         MAX_DELETES,
+        None,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -401,6 +435,7 @@ fn an_empty_token_skips_the_run() {
         &one.state(),
         timing(),
         MAX_DELETES,
+        None,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -426,6 +461,7 @@ fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
         &one.state(),
         waiting,
         MAX_DELETES,
+        None,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -442,6 +478,7 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
         &one.state(),
         timing(),
         MAX_DELETES,
+        None,
     );
     assert_eq!(health, Health::Failing);
 }

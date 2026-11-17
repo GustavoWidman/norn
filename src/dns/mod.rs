@@ -8,9 +8,13 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     cloudflare::{Api, ApiError, Capability, Verb, Write},
-    kind::{Born, Kind, Live, Step},
-    model::{Fqdn, Zone},
+    kind::{Born, Kind, Live, Mark, Sent, Step},
+    model::{Fqdn, Owner, Zone},
 };
+
+/// a create refused because the same record (81058), or one a CNAME cannot
+/// sit beside (81053), is already there
+const RACED: [u32; 2] = [81058, 81053];
 
 #[derive(Clone, Debug)]
 pub(crate) struct Dns;
@@ -88,30 +92,44 @@ impl Kind for Dns {
         Ok((ZoneId(id), live))
     }
 
-    fn write(api: &Api<Write>, zone: &ZoneId, step: &Step<Dns>) -> Result<(), ApiError> {
+    fn write(
+        api: &Api<Write>,
+        zone: &ZoneId,
+        step: &Step<Dns>,
+        mark: &Mark,
+    ) -> Result<Sent, ApiError> {
         let ZoneId(zone) = zone;
         let at = |live: &Live<Dns>| format!("/zones/{zone}/dns_records/{}", live.handle.0);
+        let comment = |retiring| {
+            Some(wire::Comment {
+                comment: mark::write(mark, retiring),
+            })
+        };
         let sent: Result<serde_json::Value, ApiError> = match step {
-            Step::Adopt { owner, live } => api.send(
-                Verb::Patch,
-                &at(live),
-                Some(&wire::Mark {
-                    comment: mark::write(owner),
-                }),
-            ),
-            Step::Update { owner, live, want } => {
-                api.send(Verb::Patch, &at(live), Some(&wire::body(want, owner)))
+            Step::Adopt { live, .. } | Step::Restore { live, .. } => {
+                api.send(Verb::Patch, &at(live), comment(false).as_ref())
+            }
+            Step::Retire { live, .. } => api.send(Verb::Patch, &at(live), comment(true).as_ref()),
+            Step::Update { live, want, .. } => {
+                api.send(Verb::Patch, &at(live), Some(&wire::body(want, mark)))
             }
             Step::Delete { live, .. } => api.send(Verb::Delete, &at(live), None::<&()>),
-            Step::Create { owner, want } => api.send(
+            Step::Create { want, .. } => api.send(
                 Verb::Post,
                 &format!("/zones/{zone}/dns_records"),
-                Some(&wire::body(want, owner)),
+                Some(&wire::body(want, mark)),
             ),
         };
         match (sent, step) {
-            (Ok(_), _) => Ok(()),
-            (Err(ApiError::NotFound), Step::Delete { .. }) => Ok(()),
+            (Ok(_), _) => Ok(Sent::Applied),
+            (Err(ApiError::NotFound), Step::Delete { .. }) => Ok(Sent::Applied),
+            (
+                Err(ApiError::Rejected { errors, .. }),
+                Step::Create {
+                    owner: Owner::Fleet,
+                    ..
+                },
+            ) if errors.iter().any(|(code, _)| RACED.contains(code)) => Ok(Sent::Raced),
             (Err(error), _) => Err(error),
         }
     }
@@ -154,6 +172,6 @@ impl Reported<'_> {
 }
 
 #[cfg(test)]
-pub(crate) fn mark(owner: &crate::model::HostName) -> String {
-    mark::write(owner)
+pub(crate) fn mark(mark: &Mark, retiring: bool) -> String {
+    mark::write(mark, retiring)
 }

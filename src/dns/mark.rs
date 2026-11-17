@@ -2,9 +2,13 @@
 //! cloudflare's free plan gives a record (one per record, at most 100 bytes;
 //! tags are paid).
 
-use crate::{kind::Ownership, model::HostName};
+use crate::{
+    kind::{Mark, Ownership, Stamp},
+    model::{HostName, Revision},
+};
 
 const PREFIX: &str = "norn ";
+const RETIRING: &str = " delete";
 
 pub(super) fn read(comment: Option<&str>) -> Ownership {
     let comment = match comment {
@@ -14,14 +18,38 @@ pub(super) fn read(comment: Option<&str>) -> Ownership {
     let Some(rest) = comment.strip_prefix(PREFIX) else {
         return Ownership::Unmarked { annotated: true };
     };
-    match rest.strip_prefix("v1 host=").map(HostName::parse) {
-        Some(Ok(host)) => Ownership::Marked(host),
-        _ => Ownership::Unreadable(comment.to_owned()),
-    }
+    let read = if let Some(host) = rest.strip_prefix("v1 host=") {
+        HostName::parse(host).ok().map(Ownership::Host)
+    } else if let Some(stamp) = rest.strip_prefix("v1 fleet t=") {
+        let (revision, retiring) = match stamp.strip_suffix(RETIRING) {
+            Some(revision) => (revision, true),
+            None => (stamp, false),
+        };
+        revision
+            .parse::<u64>()
+            .ok()
+            .filter(|parsed| parsed.to_string() == revision)
+            .map(|revision| {
+                Ownership::Fleet(Stamp {
+                    revision: Revision(revision),
+                    retiring,
+                })
+            })
+    } else {
+        None
+    };
+    read.unwrap_or_else(|| Ownership::Unreadable(comment.to_owned()))
 }
 
-pub(super) fn write(owner: &HostName) -> String {
-    format!("{PREFIX}v1 host={owner}")
+/// `retiring` marks a shared record its configuration no longer declares
+pub(super) fn write(mark: &Mark, retiring: bool) -> String {
+    match mark {
+        Mark::Host(host) => format!("{PREFIX}v1 host={host}"),
+        Mark::Fleet(revision) => {
+            let retiring = if retiring { RETIRING } else { "" };
+            format!("{PREFIX}v1 fleet t={revision}{retiring}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -31,9 +59,28 @@ mod tests {
     #[test]
     fn a_written_mark_reads_back_as_its_owner() {
         let owner = HostName::parse(&"a".repeat(63)).unwrap();
-        let mark = write(&owner);
+        let mark = write(&Mark::Host(owner.clone()), false);
         assert!(mark.len() <= 100);
-        assert_eq!(read(Some(&mark)), Ownership::Marked(owner));
+        assert_eq!(read(Some(&mark)), Ownership::Host(owner));
+    }
+
+    #[test]
+    fn a_fleet_mark_reads_back_as_its_stamp() {
+        for retiring in [false, true] {
+            let mark = write(&Mark::Fleet(Revision(u64::MAX)), retiring);
+            assert!(mark.len() <= 100);
+            assert_eq!(
+                read(Some(&mark)),
+                Ownership::Fleet(Stamp {
+                    revision: Revision(u64::MAX),
+                    retiring
+                })
+            );
+        }
+        assert_eq!(
+            write(&Mark::Fleet(Revision(1794942959)), true),
+            "norn v1 fleet t=1794942959 delete"
+        );
     }
 
     #[test]
@@ -53,6 +100,11 @@ mod tests {
             "norn v1 host=Web",
             "norn v1 fleet",
             "norn v1 fleet ",
+            "norn v1 fleet t=",
+            "norn v1 fleet t=012",
+            "norn v1 fleet t=+12",
+            "norn v1 fleet t=12 remove",
+            "norn v1 fleet t=12 delete ",
         ] {
             assert_eq!(
                 read(Some(comment)),

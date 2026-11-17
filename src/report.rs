@@ -2,13 +2,15 @@ use std::{fmt::Write, time::Duration};
 
 use crate::{
     desired::Desired,
-    run::{Line, What},
+    gate::Permit,
+    run::{Line, RACED, What},
 };
 
 const VALUE: usize = 72;
 
 pub(crate) fn render(
     desired: &Desired,
+    gate: Option<&Permit>,
     lines: &[Line],
     elapsed: Duration,
     verbose: bool,
@@ -16,7 +18,7 @@ pub(crate) fn render(
     let read = lines
         .iter()
         .filter(|line| match &line.what {
-            What::Planned(verb) => *verb != "create",
+            What::Planned(verb) | What::Held(verb, _) => *verb != "create",
             What::Kept | What::Untouched { .. } | What::Foreign(_) | What::Withheld(_) => true,
             _ => false,
         })
@@ -39,6 +41,9 @@ pub(crate) fn render(
         scopes.len(),
         elapsed,
     );
+    if let Some(gate) = gate {
+        let _ = writeln!(text, "fleet scope: {gate}");
+    }
 
     let shown = |line: &&Line| match &line.what {
         What::Kept => verbose,
@@ -48,7 +53,7 @@ pub(crate) fn render(
     let owner_width = lines
         .iter()
         .filter_map(|line| line.owner.as_ref())
-        .map(|o| o.to_string().len())
+        .map(String::len)
         .max()
         .unwrap_or(0);
     let key_width = lines
@@ -69,7 +74,9 @@ pub(crate) fn render(
         for line in block {
             let (verb, note) = match &line.what {
                 What::Planned(verb) => (*verb, None),
+                What::Held(verb, why) => (*verb, Some(format!("held: {why}"))),
                 What::Applied(verb) => (*verb, Some("applied".to_owned())),
+                What::Raced(verb) => (*verb, Some(format!("raced: {RACED}"))),
                 What::Failed(verb, why) => (*verb, Some(format!("failed: {why}"))),
                 What::Withheld(why) => ("withheld", Some(why.clone())),
                 What::Blocked(why) => ("blocked", Some(why.clone())),
@@ -83,11 +90,7 @@ pub(crate) fn render(
                 }
                 What::Foreign(whose) => ("other", Some(format!("# {whose}"))),
             };
-            let owner = line
-                .owner
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let owner = line.owner.as_deref().unwrap_or_default();
             let row = format!(
                 "  {verb:<10} {owner:<owner_width$}  {:<key_width$}  {}",
                 line.key,
@@ -111,11 +114,14 @@ pub(crate) fn render(
     let planned = |verb: &str| count(&|what| matches!(what, What::Planned(v) if *v == verb));
     let _ = writeln!(
         text,
-        "\n{} to adopt · {} to update · {} to delete · {} to create · {} withheld · {} blocked · {} untouched · {} others' · {} kept",
+        "\n{} to adopt · {} to update · {} to delete · {} to create · {} to retire · {} to restore · {} held · {} withheld · {} blocked · {} untouched · {} others' · {} kept",
         planned("adopt"),
         planned("update"),
         planned("delete"),
         planned("create"),
+        planned("retire"),
+        planned("restore"),
+        count(&|what| matches!(what, What::Held(..))),
         count(&|what| matches!(what, What::Withheld(_))),
         count(&|what| matches!(what, What::Blocked(_))),
         count(&|what| matches!(what, What::Untouched { .. })),
@@ -132,7 +138,11 @@ pub(crate) fn render(
 fn rank(what: &What) -> u8 {
     match what {
         What::Unread(_) => 0,
-        What::Planned(_) | What::Applied(_) | What::Failed(..) => 1,
+        What::Planned(_)
+        | What::Held(..)
+        | What::Applied(_)
+        | What::Raced(_)
+        | What::Failed(..) => 1,
         What::Withheld(_) => 2,
         What::Blocked(_) => 3,
         What::Kept => 4,
