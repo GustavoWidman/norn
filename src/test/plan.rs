@@ -412,3 +412,34 @@ fn a_name_is_deleted_right_before_it_is_created() {
         ]
     );
 }
+
+#[test]
+fn among_duplicates_the_exact_match_is_kept() {
+    let me = host(WEB_1);
+    let com = zone("example.com");
+    let live = vec![
+        wire("A", "app.example.com", "192.0.2.1")
+            .ttl(300)
+            .marked(&me)
+            .live(),
+        wire("A", "app.example.com", "192.0.2.1")
+            .ttl(60)
+            .marked(&me)
+            .live(),
+    ];
+    let wants = [declare(
+        &me,
+        "A",
+        "app.example.com",
+        "192.0.2.1",
+        None,
+        Ttl::Seconds(60),
+        None,
+    )];
+    let plan = plan_zone(WEB_1, &wants, &com, live);
+    assert_eq!(
+        lines(&plan),
+        ["delete web-1 A      app.example.com 192.0.2.1  dns only  ttl 300"]
+    );
+    assert_eq!(plan.kept.len(), 1);
+}
