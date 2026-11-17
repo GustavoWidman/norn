@@ -34,6 +34,11 @@ craneLib.buildPackage (
       );
     };
 
-    meta.mainProgram = "norn";
+    meta = {
+      description = "Cloudflare DNS for a Nix fleet, declared next to the services that use it";
+      homepage = "https://github.com/GustavoWidman/norn";
+      license = lib.licenses.mit;
+      mainProgram = "norn";
+    };
   }
 )

@@ -2,6 +2,9 @@
 name = "norn"
 version = "0.1.0"
 edition = "2024"
+description = "Cloudflare DNS for a Nix fleet, declared next to the services that use it"
+license = "MIT"
+repository = "https://github.com/GustavoWidman/norn"
 
 [[bin]]
 name = "norn"

@@ -1,4 +1,6 @@
 {
+  description = "cloudflare dns for a nix fleet, declared next to the services that use it";
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     fenix = {
