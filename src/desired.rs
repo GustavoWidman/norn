@@ -446,6 +446,24 @@ mod tests {
     }
 
     #[test]
+    fn a_file_of_an_older_schema_is_refused() {
+        let found = problems(json!({
+            "schema": 1,
+            "host": "web-1",
+            "mode": "report",
+            "zones": ["example.com"],
+            "host_owned": { "dns": [] },
+            "fleet_owned": { "dns": [] },
+        }));
+        assert_eq!(
+            found,
+            [
+                "schema: this norn reads schema 2, not 1; rebuild the desired file with this norn's module"
+            ]
+        );
+    }
+
+    #[test]
     fn an_unknown_field_fails() {
         let mut document = document(json!([]), json!([]));
         document["note"] = json!("x");
