@@ -204,6 +204,28 @@ to `systemctl start norn` instead of leaving behind a lock file the service's
 own user can't open. on macos the daemon and `sudo` are both root, so there
 it just runs.
 
+## sharp edges
+
+a few things norn deliberately leaves to you:
+
+- **moving a record to another machine leaves a gap.** the old machine deletes
+  it on its next run, and the new one may only create it on the run after
+  that, so the name can answer nothing for up to one sweep (5 minutes), plus
+  however long resolvers cache the gap. move records at a quiet moment.
+- **dropping a zone from `cloudflare.zones` orphans its records.** norn stops
+  reading the zone, so the records it marked there stay exactly as they are,
+  unmanaged, until you remove them by hand. add the zone back and norn picks
+  them up again.
+- **renaming a machine orphans its marks too.** the old records still say
+  `host=<old name>`, so they block the new name's declarations (the report
+  says who owns what) until you delete them or clear their comments.
+- **a type change can still blink.** turning an `A` into a `CNAME` is a delete
+  and a create, sent back to back. if cloudflare refuses the create, or the
+  run dies between the two, the name stays empty until the next sweep.
+- **a failing norn is quiet.** runs always exit 0, so nothing shows up in
+  `systemctl --failed`. `sudo norn status` is where to look: it exits 1 once
+  runs have been troubled, or silent, for 30 minutes.
+
 ## file structure
 
 ```text
