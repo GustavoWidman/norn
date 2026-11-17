@@ -1,4 +1,5 @@
 use std::{
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -12,7 +13,7 @@ use crate::{
     dns::Record,
     kind::{Ladder, Want},
     model::{HostName, Zones},
-    run::{Cloudflare, Lock, Timing, converge_with, report_with},
+    run::{Cloudflare, Lock, Timing, converge_with, owner_only, report_with},
     status::{self, Health},
 };
 
@@ -445,4 +446,21 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
         MAX_DELETES,
     );
     assert_eq!(health, Health::Failing);
+}
+
+/// a run creates `lock` and `status.json` as its caller, and once someone
+/// else owns them the service can open neither
+#[test]
+fn only_the_state_directorys_owner_converges() {
+    let one = Machine::new(WEB_1);
+    std::fs::create_dir(one.state()).unwrap();
+    let owner = std::fs::metadata(one.state()).unwrap().uid();
+
+    owner_only(&one.state(), owner).unwrap();
+    let refused = owner_only(&one.state(), owner + 1).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("systemctl start norn"),
+        "{refused:#}"
+    );
+    owner_only(&one.dir.path().join("first-run"), owner + 1).unwrap();
 }
