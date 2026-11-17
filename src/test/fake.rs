@@ -236,13 +236,11 @@ impl Deliver for Cloudflare {
                     Verb::Put | Verb::Patch => {
                         let record = &mut records[index];
                         if verb == Verb::Put {
-                            for field in [
-                                "type", "name", "content", "proxied", "ttl", "priority", "comment",
-                            ] {
-                                if let Some(object) = record.as_object_mut() {
-                                    object.remove(field);
-                                }
+                            let mut replaced = json!({ "settings": {}, "tags": [] });
+                            for field in ["id", "created_on", "modified_on"] {
+                                replaced[field] = record[field].clone();
                             }
+                            *record = replaced;
                         }
                         for (field, value) in
                             body.expect("a rewrite has a body").as_object().unwrap()

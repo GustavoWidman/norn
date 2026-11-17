@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use serde_json::json;
 use tempfile::TempDir;
 
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
 
 use super::{
     fake,
-    fixture::{WEB_1, WEB_2, baseline_records, host, proxied, want, web_1, web_2},
+    fixture::{WEB_1, WEB_2, baseline_records, host, proxied, want, web_1, web_2, wire},
 };
 
 struct Machine {
@@ -185,6 +186,32 @@ fn enforce_rewrites_creates_and_deletes_its_own_then_settles() {
         .find(|record| record["name"] == "_verify.example.org")
         .unwrap();
     assert_eq!(txt["comment"], "norn v1 host=web-1");
+}
+
+#[test]
+fn an_update_keeps_what_norn_does_not_model() {
+    let fake = cloudflare();
+    let me = host(WEB_1);
+    let mut record = wire("CNAME", "app.example.com", "example.com")
+        .marked(&me)
+        .json();
+    record["settings"] = json!({ "flatten_cname": true });
+    record["tags"] = json!(["team:web"]);
+    fake.seed("example.com", record);
+
+    let wants = vec![want(&me, "CNAME", "app.example.com", "www.example.com")];
+    assert_eq!(
+        Machine::new(WEB_1).converge(&fake, ENFORCE, wants),
+        Health::Converged
+    );
+    let app = fake
+        .records("example.com")
+        .into_iter()
+        .find(|record| record["name"] == "app.example.com")
+        .unwrap();
+    assert_eq!(app["content"], "www.example.com");
+    assert_eq!(app["settings"], json!({ "flatten_cname": true }));
+    assert_eq!(app["tags"], json!(["team:web"]));
 }
 
 #[test]
