@@ -65,9 +65,14 @@ pub(crate) fn plan<K: Kind>(
         let mut unmatched = Vec::new();
         for want in wanted {
             let identity = K::identity(&want);
-            let found = mine.iter().position(|&index| {
-                fate[index] == Fate::Open && K::identity(value(index)) == identity
-            });
+            let open = |index: usize| fate[index] == Fate::Open;
+            let found = mine
+                .iter()
+                .position(|&index| open(index) && *value(index) == want)
+                .or_else(|| {
+                    mine.iter()
+                        .position(|&index| open(index) && K::identity(value(index)) == identity)
+                });
             match found {
                 Some(position) => {
                     let index = mine.remove(position);
