@@ -73,7 +73,6 @@ in
       timerConfig = {
         OnBootSec = "${toString cfg.interval}s";
         OnUnitInactiveSec = "${toString cfg.interval}s";
-        RandomizedDelaySec = "30s";
       };
     };
   };
