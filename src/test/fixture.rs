@@ -5,14 +5,14 @@ use chrono::{DateTime, TimeDelta, Utc};
 use crate::{
     dns::{self, Dns, Record, Reported, Ttl},
     kind::{Live, Ownership, Step, Want},
-    model::{HostName, Owner, Zone},
+    model::{HostName, Zone},
 };
 
 pub(crate) const WEB_1: &str = "web-1";
 pub(crate) const WEB_2: &str = "web-2";
 
-pub(crate) fn host(name: &str) -> Owner {
-    Owner::Host(HostName::parse(name).unwrap())
+pub(crate) fn host(name: &str) -> HostName {
+    HostName::parse(name).unwrap()
 }
 
 pub(crate) fn zone(name: &str) -> Zone {
@@ -66,7 +66,7 @@ impl Wire {
         self
     }
 
-    pub fn marked(self, owner: &Owner) -> Self {
+    pub fn marked(self, owner: &HostName) -> Self {
         self.comment(&dns::mark(owner))
     }
 
@@ -104,7 +104,7 @@ impl Wire {
         })
     }
 
-    pub fn written(record: &Record, owner: &Owner) -> Self {
+    pub fn written(record: &Record, owner: &HostName) -> Self {
         let reach = record.data.reach();
         Wire {
             kind: match record.data.record_type() {
@@ -127,20 +127,20 @@ impl Wire {
     }
 }
 
-pub(crate) fn want(owner: &Owner, kind: &str, name: &str, content: &str) -> Want<Dns> {
+pub(crate) fn want(owner: &HostName, kind: &str, name: &str, content: &str) -> Want<Dns> {
     declare(owner, kind, name, content, None, Ttl::Auto, None)
 }
 
-pub(crate) fn proxied(owner: &Owner, kind: &str, name: &str, content: &str) -> Want<Dns> {
+pub(crate) fn proxied(owner: &HostName, kind: &str, name: &str, content: &str) -> Want<Dns> {
     declare(owner, kind, name, content, Some(true), Ttl::Auto, None)
 }
 
-pub(crate) fn mx(owner: &Owner, name: &str, exchange: &str, priority: u16) -> Want<Dns> {
+pub(crate) fn mx(owner: &HostName, name: &str, exchange: &str, priority: u16) -> Want<Dns> {
     declare(owner, "MX", name, exchange, None, Ttl::Auto, Some(priority))
 }
 
 pub(crate) fn declare(
-    owner: &Owner,
+    owner: &HostName,
     kind: &str,
     name: &str,
     content: &str,

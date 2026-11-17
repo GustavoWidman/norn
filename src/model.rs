@@ -5,9 +5,6 @@ pub(crate) struct HostName(String);
 
 impl HostName {
     pub fn parse(name: &str) -> Result<Self, String> {
-        if name == "fleet" {
-            return Err("`fleet` names the fleet's own mark and cannot be a machine's name".into());
-        }
         if name.is_empty() || name.len() > 63 {
             return Err(format!("{name:?} is not 1 to 63 bytes long"));
         }
@@ -22,43 +19,11 @@ impl HostName {
         }
         Ok(Self(name.to_owned()))
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Display for HostName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) enum Owner {
-    Fleet,
-    Host(HostName),
-}
-
-impl fmt::Display for Owner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Owner::Fleet => f.write_str("fleet"),
-            Owner::Host(host) => f.write_str(host.as_str()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Owners(BTreeSet<Owner>);
-
-impl Owners {
-    pub fn machine(host: HostName) -> Self {
-        Self(BTreeSet::from([Owner::Host(host), Owner::Fleet]))
-    }
-
-    pub fn contains(&self, owner: &Owner) -> bool {
-        self.0.contains(owner)
     }
 }
 
@@ -263,9 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_named_fleet_is_refused() {
-        assert!(HostName::parse("fleet").is_err());
+    fn a_machine_name_is_a_lowercase_label() {
         assert!(HostName::parse("oracle-1").is_ok());
         assert!(HostName::parse("Oracle").is_err());
+        assert!(HostName::parse("-oracle").is_err());
     }
 }

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     cloudflare::{Api, ApiError, Capability, Write},
-    model::Owner,
+    model::HostName,
 };
 
 pub(crate) trait Kind: Sized + Clone + Debug {
@@ -47,7 +47,7 @@ pub(crate) struct Born {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Ownership {
-    Marked(Owner),
+    Marked(HostName),
     Unmarked { annotated: bool },
     Unreadable(String),
 }
@@ -55,27 +55,27 @@ pub(crate) enum Ownership {
 #[derive(Clone, Debug)]
 pub(crate) struct Want<K: Kind> {
     pub scope: K::Scope,
-    pub owner: Owner,
+    pub owner: HostName,
     pub value: K::Value,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum Step<K: Kind> {
     Adopt {
-        owner: Owner,
+        owner: HostName,
         live: Live<K>,
     },
     Update {
-        owner: Owner,
+        owner: HostName,
         live: Live<K>,
         want: K::Value,
     },
     Delete {
-        owner: Owner,
+        owner: HostName,
         live: Live<K>,
     },
     Create {
-        owner: Owner,
+        owner: HostName,
         want: K::Value,
     },
 }
@@ -109,7 +109,7 @@ impl<K: Kind> Step<K> {
         }
     }
 
-    pub fn owner(&self) -> &Owner {
+    pub fn owner(&self) -> &HostName {
         match self {
             Step::Adopt { owner, .. }
             | Step::Update { owner, .. }
@@ -153,7 +153,7 @@ impl<K: Kind> Step<K> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Blocked<K: Kind> {
-    pub owner: Owner,
+    pub owner: HostName,
     pub want: K::Value,
     pub by: Live<K>,
     pub why: Why,
@@ -163,7 +163,7 @@ pub(crate) struct Blocked<K: Kind> {
 pub(crate) enum Why {
     Differs,
     Annotated,
-    Owned(Owner),
+    Owned(HostName),
     Unreadable,
     Occupied,
     Excludes,

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Record, mark};
-use crate::model::Owner;
+use crate::model::HostName;
 
 #[derive(Deserialize)]
 pub(super) struct Zone {
@@ -46,7 +46,7 @@ pub(super) struct Mark {
     pub comment: String,
 }
 
-pub(super) fn body(record: &Record, owner: &Owner) -> Body {
+pub(super) fn body(record: &Record, owner: &HostName) -> Body {
     Body {
         kind: record.data.record_type().as_str().to_owned(),
         name: record.name.to_string(),
@@ -61,10 +61,10 @@ pub(super) fn body(record: &Record, owner: &Owner) -> Body {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dns::Ttl, model::HostName};
+    use crate::dns::Ttl;
 
-    fn web() -> Owner {
-        Owner::Host(HostName::parse("web-1").unwrap())
+    fn web() -> HostName {
+        HostName::parse("web-1").unwrap()
     }
 
     #[test]
@@ -89,11 +89,11 @@ mod tests {
             Some(10),
         )
         .unwrap();
-        let mx = body(&mx, &Owner::Fleet);
+        let mx = body(&mx, &web());
         assert_eq!((mx.proxied, mx.priority, mx.ttl), (None, Some(10), 300));
         let txt =
             Record::declared("example.com", "TXT", "v=spf1 -all", None, Ttl::Auto, None).unwrap();
-        let json = serde_json::to_value(body(&txt, &Owner::Fleet)).unwrap();
+        let json = serde_json::to_value(body(&txt, &web())).unwrap();
         assert_eq!(json.get("proxied"), None);
         assert_eq!(json["content"], "v=spf1 -all");
     }

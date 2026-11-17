@@ -139,20 +139,12 @@ let
 
   keys = sets: lib.unique (map (row: "${row.name} ${row.type}") (rows sets));
 
-  # nixos and nix-darwin merge the same modules in different orders, so the
-  # digest every machine compares is over sorted lists
-  fleetSection = {
-    zones = lib.sort lib.lessThan (lib.unique cf.zones);
-    dns = lib.sort (a: b: builtins.toJSON a < builtins.toJSON b) (rows cf.fleet.dns);
-  };
-
   desired = pkgs.runCommandLocal "norn-desired.json" {
     raw = builtins.toJSON {
-      schema = 1;
+      schema = 2;
       inherit (cfg) host mode;
       inherit (cf) zones;
-      host_owned.dns = rows cf.dns;
-      fleet_owned.dns = rows cf.fleet.dns;
+      dns = rows cf.dns;
     };
     passAsFile = [ "raw" ];
   } ''
@@ -163,14 +155,7 @@ let
     let
       peers = lib.filterAttrs (_: claims: claims.enabled) cfg.peers;
       claimed = lib.concatLists (
-        lib.mapAttrsToList (
-          host: claims:
-          map (key: { inherit key host; }) claims.keys
-          ++ map (key: {
-            inherit key;
-            host = "fleet";
-          }) claims.fleetKeys
-        ) peers
+        lib.mapAttrsToList (host: claims: map (key: { inherit key host; }) claims.keys) peers
       );
       owners = lib.mapAttrs (_: entries: lib.sort lib.lessThan (lib.unique (map (entry: entry.host) entries))) (
         lib.groupBy (entry: entry.key) claimed
@@ -181,16 +166,11 @@ let
       beside =
         cname:
         lib.filter (key: key != cname && nameOf key == nameOf cname) (lib.attrNames owners);
-      digests = lib.unique (lib.mapAttrsToList (_: claims: claims.fleetDigest) peers);
     in
     [
       {
         assertion = cfg.peers ? ${cfg.host};
         message = "norn: services.norn.peers does not list ${cfg.host}; pass every machine's cloudflare.claims.";
-      }
-      {
-        assertion = lib.length digests <= 1;
-        message = "norn: the fleet's zones or fleet records differ between machines (${lib.concatStringsSep ", " (lib.attrNames peers)}); declare them once, in a module every machine that runs norn imports.";
       }
     ]
     ++ lib.mapAttrsToList (key: hosts: {
@@ -208,7 +188,7 @@ in
       type = types.listOf types.str;
       default = [ ];
       example = [ "example.com" ];
-      description = "Zones the fleet manages. Every machine that runs norn declares the same.";
+      description = "Zones the fleet manages. norn reads them and writes nothing outside them.";
     };
 
     address = {
@@ -230,22 +210,9 @@ in
       example = lib.literalExpression ''{ "cache.example.com".a = { }; }'';
       description = ''
         Records this machine owns, by name. Only this machine writes them, and
-        no other machine may declare the same name and type.
-      '';
-    };
-
-    fleet.dns = mkOption {
-      type = types.attrsOf (
-        recordSet {
-          ipv4 = null;
-          ipv6 = null;
-        }
-      );
-      default = { };
-      description = ''
-        Records every machine that runs norn writes, identically. Every such
-        machine must declare exactly the same set; declare them in a module all
-        of them import.
+        no other machine may declare the same name and type. A record no one
+        machine owns, such as a domain's mail setup, is declared on the machine
+        that serves it.
       '';
     };
 
@@ -287,7 +254,7 @@ in
       description = ''
         `report` only reads and logs the plan. `adopt` marks unmarked records
         that already equal their declaration. `enforce` also creates, updates
-        and deletes this machine's and the fleet's marked records.
+        and deletes this machine's marked records.
       '';
     };
 
@@ -320,9 +287,8 @@ in
       example = lib.literalExpression "lib.mapAttrs (name: _: self.\${name}.cloudflare.claims) machines";
       description = ''
         Every fleet machine's `cloudflare.claims`, by name, this one included.
-        The build fails when two machines claim one name and type, when the
-        fleet section differs between machines, or when a CNAME shares its
-        name across machines.
+        The build fails when two machines claim one name and type, or when a
+        CNAME shares its name across machines.
       '';
     };
 
@@ -345,8 +311,6 @@ in
       cloudflare.claims = {
         enabled = cfg.enable;
         keys = keys cf.dns;
-        fleetKeys = keys cf.fleet.dns;
-        fleetDigest = builtins.hashString "sha256" (builtins.toJSON fleetSection);
       };
     }
 
@@ -386,7 +350,7 @@ in
     (lib.mkIf (!cfg.enable) {
       assertions = [
         {
-          assertion = cf.dns == { } && cf.fleet.dns == { };
+          assertion = cf.dns == { };
           message = "norn: ${cfg.host} declares cloudflare records but services.norn.enable is false, so nothing would apply them.";
         }
       ];

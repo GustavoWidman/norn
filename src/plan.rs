@@ -2,30 +2,21 @@ use std::collections::BTreeMap;
 
 use crate::{
     kind::{Blocked, Kind, Live, Ownership, Plan, Step, Want, Why},
-    model::{Owner, Owners},
+    model::HostName,
 };
 
 pub(crate) const MAX_DELETES: usize = 10;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Fate {
     Open,
-    Kept(Owner),
-    Written(Owner),
+    Kept,
+    Written,
     Deleted,
 }
 
-impl Fate {
-    fn owner(&self) -> Option<&Owner> {
-        match self {
-            Fate::Kept(owner) | Fate::Written(owner) => Some(owner),
-            Fate::Open | Fate::Deleted => None,
-        }
-    }
-}
-
 pub(crate) fn plan<K: Kind>(
-    owners: &Owners,
+    owner: &HostName,
     wants: Vec<Want<K>>,
     mut live: Vec<Live<K>>,
     deletes_left: &mut usize,
@@ -33,25 +24,23 @@ pub(crate) fn plan<K: Kind>(
     live.sort_by(|a, b| a.born.cmp(&b.born));
     let mut fate = vec![Fate::Open; live.len()];
 
-    let mut declared: BTreeMap<(Owner, K::Key), Vec<K::Value>> = BTreeMap::new();
+    let mut declared: BTreeMap<K::Key, Vec<K::Value>> = BTreeMap::new();
     for want in wants {
-        debug_assert!(owners.contains(&want.owner));
+        debug_assert_eq!(&want.owner, owner);
         declared
-            .entry((want.owner, K::key(&want.value)))
+            .entry(K::key(&want.value))
             .or_default()
             .push(want.value);
     }
-    let mut held: BTreeMap<(Owner, K::Key), Vec<usize>> = BTreeMap::new();
+    let mut held: BTreeMap<K::Key, Vec<usize>> = BTreeMap::new();
     for (index, object) in live.iter().enumerate() {
-        if let (Ownership::Marked(owner), Some(_)) = (&object.ownership, &object.value)
-            && owners.contains(owner)
+        if let (Ownership::Marked(marked), Some(_)) = (&object.ownership, &object.value)
+            && marked == owner
         {
-            held.entry((owner.clone(), object.key.clone()))
-                .or_default()
-                .push(index);
+            held.entry(object.key.clone()).or_default().push(index);
         }
     }
-    let slots: Vec<(Owner, K::Key)> = {
+    let slots: Vec<K::Key> = {
         let mut slots: Vec<_> = declared.keys().chain(held.keys()).cloned().collect();
         slots.sort();
         slots.dedup();
@@ -69,14 +58,10 @@ pub(crate) fn plan<K: Kind>(
     let mut deletes = Vec::new();
     let mut creates = Vec::new();
 
-    for (owner, key) in slots {
-        let mut wanted = declared
-            .remove(&(owner.clone(), key.clone()))
-            .unwrap_or_default();
+    for key in slots {
+        let mut wanted = declared.remove(&key).unwrap_or_default();
         wanted.sort_by_key(|value| K::identity(value));
-        let mut mine = held
-            .remove(&(owner.clone(), key.clone()))
-            .unwrap_or_default();
+        let mut mine = held.remove(&key).unwrap_or_default();
         mine.sort_by(|&a, &b| K::identity(value(a)).cmp(&K::identity(value(b))));
 
         let mut unmatched = Vec::new();
@@ -89,9 +74,9 @@ pub(crate) fn plan<K: Kind>(
                 Some(position) => {
                     let index = mine.remove(position);
                     if *value(index) == want {
-                        fate[index] = Fate::Kept(owner.clone());
+                        fate[index] = Fate::Kept;
                     } else {
-                        fate[index] = Fate::Written(owner.clone());
+                        fate[index] = Fate::Written;
                         steps.push(Step::Update {
                             owner: owner.clone(),
                             live: live[index].clone(),
@@ -121,7 +106,7 @@ pub(crate) fn plan<K: Kind>(
                     && live[index].value.as_ref() == Some(&want)
             });
             if let Some(index) = twin {
-                fate[index] = Fate::Written(owner.clone());
+                fate[index] = Fate::Written;
                 steps.push(Step::Adopt {
                     owner: owner.clone(),
                     live: live[index].clone(),
@@ -154,27 +139,27 @@ pub(crate) fn plan<K: Kind>(
         for want in free {
             match leftover.next() {
                 Some(index) => {
-                    fate[index] = Fate::Written(owner.clone());
+                    fate[index] = Fate::Written;
                     steps.push(Step::Update {
                         owner: owner.clone(),
                         live: live[index].clone(),
                         want,
                     });
                 }
-                None => creates.push((owner.clone(), want)),
+                None => creates.push(want),
             }
         }
-        deletes.extend(leftover.map(|index| (owner.clone(), index)));
+        deletes.extend(leftover);
     }
 
     let mut withheld = Vec::new();
-    for (owner, index) in deletes {
+    for index in deletes {
         let step = Step::Delete {
             owner: owner.clone(),
             live: live[index].clone(),
         };
         if *deletes_left == 0 {
-            fate[index] = Fate::Written(owner);
+            fate[index] = Fate::Written;
             withheld.push(step);
         } else {
             *deletes_left -= 1;
@@ -183,19 +168,19 @@ pub(crate) fn plan<K: Kind>(
         }
     }
 
-    for (owner, want) in creates {
+    for want in creates {
         let key = K::key(&want);
         let stays = |index: &usize| fate[*index] != Fate::Deleted;
         let occupant = (0..live.len())
             .filter(stays)
-            .find(|&index| live[index].key == key && fate[index].owner() != Some(&owner));
+            .find(|&index| live[index].key == key && fate[index] == Fate::Open);
         let excluder = (0..live.len())
             .filter(stays)
             .find(|&index| live[index].key != key && K::excludes(&key, &live[index].key));
         match (occupant, excluder) {
             (Some(index), _) => {
                 blocked.push(Blocked {
-                    owner,
+                    owner: owner.clone(),
                     want,
                     by: live[index].clone(),
                     why: Why::Occupied,
@@ -203,13 +188,16 @@ pub(crate) fn plan<K: Kind>(
             }
             (None, Some(index)) => {
                 blocked.push(Blocked {
-                    owner,
+                    owner: owner.clone(),
                     want,
                     by: live[index].clone(),
                     why: Why::Excludes,
                 });
             }
-            (None, None) => steps.push(Step::Create { owner, want }),
+            (None, None) => steps.push(Step::Create {
+                owner: owner.clone(),
+                want,
+            }),
         }
     }
 
@@ -238,8 +226,8 @@ pub(crate) fn plan<K: Kind>(
     let mut foreign = Vec::new();
     for (object, fate) in live.into_iter().zip(fate) {
         match (fate, &object.ownership) {
-            (Fate::Kept(_), _) => kept.push(object),
-            (Fate::Written(_) | Fate::Deleted, _) => {}
+            (Fate::Kept, _) => kept.push(object),
+            (Fate::Written | Fate::Deleted, _) => {}
             (Fate::Open, Ownership::Unmarked { .. }) => untouched.push(object),
             (Fate::Open, _) => foreign.push(object),
         }

@@ -13,7 +13,7 @@ use crate::{
     desired::{Desired, Mode, Problems, Wants},
     dns::Dns,
     kind::{Kind, Ladder, Live, Ownership, Plan, Step, Want},
-    model::{Owner, Owners},
+    model::HostName,
     plan::{MAX_DELETES, plan},
 };
 
@@ -265,7 +265,7 @@ pub(crate) struct Line {
     pub kind: &'static str,
     pub scope: String,
     pub what: What,
-    pub owner: Option<Owner>,
+    pub owner: Option<HostName>,
     pub key: String,
     pub value: String,
 }
@@ -287,7 +287,7 @@ impl Line {
     fn of<K: Kind>(
         scope: &K::Scope,
         what: What,
-        owner: Option<&Owner>,
+        owner: Option<&HostName>,
         key: &K::Key,
         value: String,
     ) -> Self {
@@ -485,13 +485,12 @@ fn unread<K: Kind>(scope: &K::Scope, error: &ApiError) -> Line {
 }
 
 fn visit<C: Capability>(api: &Api<C>, desired: &Desired, act: &mut impl Act) {
-    let owners = desired.owners();
     let mut deletes_left = MAX_DELETES;
     let Wants { dns } = desired.wants();
     let zones = desired.zones.iter().cloned().collect();
     act.on(plan_kind::<Dns, C>(
         api,
-        &owners,
+        &desired.host,
         zones,
         dns,
         &mut deletes_left,
@@ -500,7 +499,7 @@ fn visit<C: Capability>(api: &Api<C>, desired: &Desired, act: &mut impl Act) {
 
 fn plan_kind<K: Kind, C: Capability>(
     api: &Api<C>,
-    owners: &Owners,
+    owner: &HostName,
     scopes: Vec<K::Scope>,
     wants: Vec<Want<K>>,
     deletes_left: &mut usize,
@@ -514,7 +513,7 @@ fn plan_kind<K: Kind, C: Capability>(
                     .filter(|want| want.scope == scope)
                     .cloned()
                     .collect();
-                let plan = plan(owners, mine, live, deletes_left);
+                let plan = plan(owner, mine, live, deletes_left);
                 Scoped::Read { scope, place, plan }
             }
             Err(error) => Scoped::Unread { scope, error },
