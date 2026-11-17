@@ -65,6 +65,7 @@ mod tests {
             "norn v2 host=web",
             "norn v1 host=fleet",
             "norn v1 host=Web",
+            "norn v1 fleet",
             "norn v1 fleet ",
         ] {
             assert_eq!(
