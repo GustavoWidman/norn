@@ -39,8 +39,7 @@ impl Machine {
             host: HostName::parse(self.host).unwrap(),
             mode,
             zones: Zones::parse(&zones).unwrap(),
-            host_owned: records,
-            fleet_owned: vec![],
+            dns: records,
         };
         let raw = self.dir.path().join("raw.json");
         std::fs::write(&raw, desired.canonical()).unwrap();

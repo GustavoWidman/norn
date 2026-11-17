@@ -78,23 +78,11 @@ let
     };
   };
   desktop.services.norn.enable = false;
-  dashboard.cloudflare.fleet.dns."status.example.com".cname = {
-    target = "example.com";
-    proxied = true;
-  };
 
   cases = {
     clean = {
       fleet = {
-        web-1 = with' [
-          web-1
-          dashboard
-        ];
-        web-2 = with' [
-          web-2
-          dashboard
-        ];
-        inherit desktop;
+        inherit web-1 web-2 desktop;
       };
       expect = [ ];
     };
@@ -108,33 +96,6 @@ let
       };
       expect = [
         "norn: cache.example.com A is claimed by web-1 and web-2; one name and type has one owner."
-      ];
-    };
-    fleet-owned-collision = {
-      fleet = {
-        web-1 = with' [
-          web-1
-          { cloudflare.fleet.dns."cache.example.com".a.addresses = [ "192.0.2.1" ]; }
-        ];
-        web-2 = with' [
-          web-2
-          { cloudflare.fleet.dns."cache.example.com".a.addresses = [ "192.0.2.1" ]; }
-        ];
-      };
-      expect = [
-        "norn: cache.example.com A is claimed by fleet and web-1; one name and type has one owner."
-      ];
-    };
-    skew = {
-      fleet = {
-        web-1 = with' [
-          web-1
-          dashboard
-        ];
-        inherit web-2;
-      };
-      expect = [
-        "norn: the fleet's zones or fleet records differ between machines (web-1, web-2); declare them once, in a module every machine that runs norn imports."
       ];
     };
     cname-beside-another-machines-record = {

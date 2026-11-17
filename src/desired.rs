@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, fmt, path::Path};
 use crate::{
     dns::{Dns, Record, RecordType, Slot},
     kind::{Ladder, Want},
-    model::{Fqdn, HostName, Owner, Owners, Zones},
+    model::{Fqdn, HostName, Zones},
 };
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -29,8 +29,7 @@ pub(crate) struct Desired {
     pub host: HostName,
     pub mode: Mode,
     pub zones: Zones,
-    pub host_owned: Vec<Record>,
-    pub fleet_owned: Vec<Record>,
+    pub dns: Vec<Record>,
 }
 
 pub(crate) struct Wants {
@@ -73,12 +72,22 @@ impl Desired {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, Problems> {
-        let document: document::Document = serde_json::from_slice(bytes).map_err(|error| {
+        let garbled = |error: serde_json::Error| {
             Problems(vec![Problem {
                 subject: "the desired file".into(),
                 message: error.to_string(),
             }])
-        })?;
+        };
+        let document::Schema { schema } = serde_json::from_slice(bytes).map_err(garbled)?;
+        if schema != SCHEMA {
+            return Err(Problems(vec![Problem {
+                subject: "schema".into(),
+                message: format!(
+                    "this norn reads schema {SCHEMA}, not {schema}; rebuild the desired file with this norn's module"
+                ),
+            }]));
+        }
+        let document: document::Document = serde_json::from_slice(bytes).map_err(garbled)?;
 
         let mut problems = Vec::new();
         let mut problem = |subject: &str, message: String| {
@@ -88,12 +97,6 @@ impl Desired {
             });
         };
 
-        if document.schema != SCHEMA {
-            problem(
-                "schema",
-                format!("this norn reads schema {SCHEMA}, not {}", document.schema),
-            );
-        }
         let host = HostName::parse(&document.host)
             .map_err(|message| problem("host", message))
             .ok();
@@ -114,41 +117,33 @@ impl Desired {
             })
             .ok();
 
-        let mut host_owned = Vec::new();
-        let mut fleet_owned = Vec::new();
-        for (records, owned, into) in [
-            (&document.host_owned.dns, "host", &mut host_owned),
-            (&document.fleet_owned.dns, "fleet", &mut fleet_owned),
-        ] {
-            for declared in records {
-                let subject = format!("{owned} dns {} {}", declared.name, declared.kind);
-                let record = declared.ttl.parse().and_then(|ttl| {
-                    Record::declared(
-                        &declared.name,
-                        &declared.kind,
-                        &declared.content,
-                        declared.proxied,
-                        ttl,
-                        declared.priority,
-                    )
-                });
-                match (record, &zones) {
-                    (Err(message), _) => problem(&subject, message),
-                    (Ok(record), Some(zones)) if zones.zone_of(&record.name).is_none() => {
-                        problem(
-                            &subject,
-                            format!("{} is outside every managed zone ({zones})", record.name),
-                        );
-                    }
-                    (Ok(record), _) => into.push(record),
+        let mut dns = Vec::new();
+        for declared in &document.dns {
+            let subject = format!("dns {} {}", declared.name, declared.kind);
+            let record = declared.ttl.parse().and_then(|ttl| {
+                Record::declared(
+                    &declared.name,
+                    &declared.kind,
+                    &declared.content,
+                    declared.proxied,
+                    ttl,
+                    declared.priority,
+                )
+            });
+            match (record, &zones) {
+                (Err(message), _) => problem(&subject, message),
+                (Ok(record), Some(zones)) if zones.zone_of(&record.name).is_none() => {
+                    problem(
+                        &subject,
+                        format!("{} is outside every managed zone ({zones})", record.name),
+                    );
                 }
+                (Ok(record), _) => dns.push(record),
             }
         }
 
-        for records in [&mut host_owned, &mut fleet_owned] {
-            records.sort_by_key(|record| (record.slot(), record.data.content()));
-        }
-        for (subject, message) in collisions(&host_owned, &fleet_owned) {
+        dns.sort_by_key(|record| (record.slot(), record.data.content()));
+        for (subject, message) in collisions(&dns) {
             problem(&subject, message);
         }
 
@@ -157,85 +152,52 @@ impl Desired {
                 host,
                 mode,
                 zones,
-                host_owned,
-                fleet_owned,
+                dns,
             }),
             _ => Err(Problems(problems)),
         }
     }
 
     pub fn canonical(&self) -> String {
-        let section = |records: &[Record]| document::Objects {
-            dns: records.iter().map(document::Record::from).collect(),
-        };
         let document = document::Document {
             schema: SCHEMA,
             host: self.host.to_string(),
             mode: self.mode.as_str().to_owned(),
             zones: self.zones.iter().map(ToString::to_string).collect(),
-            host_owned: section(&self.host_owned),
-            fleet_owned: section(&self.fleet_owned),
+            dns: self.dns.iter().map(document::Record::from).collect(),
         };
         let mut text = serde_json::to_string_pretty(&document).expect("the document serializes");
         text.push('\n');
         text
     }
 
-    pub fn owners(&self) -> Owners {
-        Owners::machine(self.host.clone())
-    }
-
     pub fn wants(&self) -> Wants {
-        Wants { dns: self.dns() }
-    }
-
-    fn dns(&self) -> Vec<Want<Dns>> {
-        let owned = |owner: Owner, records: &[Record]| -> Vec<Want<Dns>> {
-            records
-                .iter()
-                .map(|record| Want {
-                    scope: self
-                        .zones
-                        .zone_of(&record.name)
-                        .expect("parse checked every name's zone")
-                        .clone(),
-                    owner: owner.clone(),
-                    value: record.clone(),
-                })
-                .collect()
-        };
-        let mut wants = owned(Owner::Host(self.host.clone()), &self.host_owned);
-        wants.extend(owned(Owner::Fleet, &self.fleet_owned));
-        wants
+        let dns = self
+            .dns
+            .iter()
+            .map(|record| Want {
+                scope: self
+                    .zones
+                    .zone_of(&record.name)
+                    .expect("parse checked every name's zone")
+                    .clone(),
+                owner: self.host.clone(),
+                value: record.clone(),
+            })
+            .collect();
+        Wants { dns }
     }
 }
 
-fn collisions(host_owned: &[Record], fleet_owned: &[Record]) -> Vec<(String, String)> {
+fn collisions(records: &[Record]) -> Vec<(String, String)> {
     let mut found = Vec::new();
-    let mut slots: BTreeMap<Slot, Vec<(&str, &Record)>> = BTreeMap::new();
-    for (owner, records) in [("host", host_owned), ("fleet", fleet_owned)] {
-        for record in records {
-            slots
-                .entry(record.slot())
-                .or_default()
-                .push((owner, record));
-        }
+    let mut slots: BTreeMap<Slot, Vec<&Record>> = BTreeMap::new();
+    for record in records {
+        slots.entry(record.slot()).or_default().push(record);
     }
     for (slot, records) in &slots {
         let subject = format!("dns {} {}", slot.name, slot.kind.as_str());
-        if records.iter().any(|(owner, _)| *owner == "host")
-            && records.iter().any(|(owner, _)| *owner == "fleet")
-        {
-            found.push((
-                subject.clone(),
-                "declared as both this machine's and the fleet's; one name and type has one owner"
-                    .into(),
-            ));
-        }
-        let mut contents: Vec<_> = records
-            .iter()
-            .map(|(_, record)| record.data.content())
-            .collect();
+        let mut contents: Vec<_> = records.iter().map(|record| record.data.content()).collect();
         contents.sort();
         if contents.windows(2).any(|pair| pair[0] == pair[1]) {
             found.push((subject.clone(), "the same record is declared twice".into()));
@@ -275,6 +237,11 @@ mod document {
 
     use crate::dns::{Rdata, Record as Value, Ttl};
 
+    #[derive(Deserialize)]
+    pub struct Schema {
+        pub schema: u32,
+    }
+
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     pub struct Document {
@@ -282,13 +249,6 @@ mod document {
         pub host: String,
         pub mode: String,
         pub zones: Vec<String>,
-        pub host_owned: Objects,
-        pub fleet_owned: Objects,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct Objects {
         pub dns: Vec<Record>,
     }
 
@@ -353,17 +313,13 @@ mod tests {
 
     use super::*;
 
-    fn document(
-        host_owned: serde_json::Value,
-        fleet_owned: serde_json::Value,
-    ) -> serde_json::Value {
+    fn document(dns: serde_json::Value) -> serde_json::Value {
         json!({
-            "schema": 1,
+            "schema": 2,
             "host": "web-1",
             "mode": "report",
             "zones": ["example.com", "example.org"],
-            "host_owned": { "dns": host_owned },
-            "fleet_owned": { "dns": fleet_owned },
+            "dns": dns,
         })
     }
 
@@ -393,16 +349,14 @@ mod tests {
         long["ttl"] = json!(300);
         let mut proxied = record("example.com", "A", "192.0.2.1");
         proxied["proxied"] = json!(true);
-        let document = document(
-            json!([
-                record("www.example.com", "CNAME", "example.com"),
-                long,
-                proxied,
-                record("example.com", "MX", "mail.example.com"),
-                record("example.com", "TXT", "\"quoted\" text"),
-            ]),
-            json!([record("status.example.org", "A", "192.0.2.9")]),
-        );
+        let document = document(json!([
+            record("www.example.com", "CNAME", "example.com"),
+            long,
+            proxied,
+            record("example.com", "MX", "mail.example.com"),
+            record("example.com", "TXT", "\"quoted\" text"),
+            record("status.example.org", "A", "192.0.2.9"),
+        ]));
         let desired = Desired::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
         let canonical = desired.canonical();
         let again = Desired::parse(canonical.as_bytes()).unwrap();
@@ -412,15 +366,12 @@ mod tests {
 
     #[test]
     fn every_problem_is_reported_at_once() {
-        let found = problems(document(
-            json!([
-                record("blog.example.net", "A", "192.0.2.1"),
-                record("Blog.example.com", "A", "192.0.2.1"),
-                record("api.example.com", "A", "192.0.2.300"),
-                record("x.example.com", "SRV", "0 5 5060 sip.example.com"),
-            ]),
-            json!([]),
-        ));
+        let found = problems(document(json!([
+            record("blog.example.net", "A", "192.0.2.1"),
+            record("Blog.example.com", "A", "192.0.2.1"),
+            record("api.example.com", "A", "192.0.2.300"),
+            record("x.example.com", "SRV", "0 5 5060 sip.example.com"),
+        ])));
         assert_eq!(found.len(), 4, "{found:#?}");
         assert!(found[0].contains("outside every managed zone (example.com, example.org)"));
         assert!(found[1].contains("canonical"));
@@ -429,20 +380,16 @@ mod tests {
     }
 
     #[test]
-    fn one_name_and_type_has_one_owner_and_a_cname_stands_alone() {
-        let found = problems(document(
-            json!([
-                record("app.example.com", "A", "192.0.2.1"),
-                record("app.example.com", "A", "192.0.2.1"),
-                record("www.example.com", "CNAME", "example.com"),
-                record("www.example.com", "TXT", "hello"),
-            ]),
-            json!([record("app.example.com", "A", "192.0.2.2")]),
-        ));
-        assert_eq!(found.len(), 3, "{found:#?}");
-        assert!(found[0].contains("both this machine's and the fleet's"));
-        assert!(found[1].contains("declared twice"));
-        assert!(found[2].contains("CNAME shares its name with nothing"));
+    fn a_record_is_declared_once_and_a_cname_stands_alone() {
+        let found = problems(document(json!([
+            record("app.example.com", "A", "192.0.2.1"),
+            record("app.example.com", "A", "192.0.2.1"),
+            record("www.example.com", "CNAME", "example.com"),
+            record("www.example.com", "TXT", "hello"),
+        ])));
+        assert_eq!(found.len(), 2, "{found:#?}");
+        assert!(found[0].contains("declared twice"));
+        assert!(found[1].contains("CNAME shares its name with nothing"));
     }
 
     #[test]
@@ -465,22 +412,12 @@ mod tests {
 
     #[test]
     fn an_unknown_field_fails() {
-        let mut document = document(json!([]), json!([]));
+        let mut document = document(json!([]));
         document["note"] = json!("x");
         assert!(problems(document)[0].contains("unknown field"));
         let mut extra = record("example.com", "A", "192.0.2.1");
         extra["comment"] = json!("x");
-        assert!(
-            problems(super::tests::document(json!([extra]), json!([])))[0]
-                .contains("unknown field")
-        );
-    }
-
-    #[test]
-    fn a_machine_named_fleet_fails() {
-        let mut document = document(json!([]), json!([]));
-        document["host"] = json!("fleet");
-        assert!(problems(document)[0].starts_with("host: `fleet` names the fleet's own mark"));
+        assert!(problems(super::tests::document(json!([extra])))[0].contains("unknown field"));
     }
 
     #[test]
@@ -488,6 +425,6 @@ mod tests {
         let mut proxied = record("example.com", "A", "192.0.2.1");
         proxied["proxied"] = json!(true);
         proxied["ttl"] = json!(300);
-        assert!(problems(document(json!([proxied]), json!([])))[0].contains("always auto"));
+        assert!(problems(document(json!([proxied])))[0].contains("always auto"));
     }
 }

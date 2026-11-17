@@ -27,12 +27,10 @@ without talking to any other machine.
 ## ownership
 
 every record norn writes carries a mark, and the mark is the whole comment:
+`norn v1 host=<host>`, naming the one machine that writes it.
 
-- `norn v1 host=<host>` for a record only that machine writes.
-- `norn v1 fleet` for a record every machine running norn writes, identically.
-
-a machine updates and deletes only records carrying its own mark or the
-fleet's. everything else is left alone: records with a note a person wrote,
+a machine updates and deletes only records carrying its own mark. everything
+else is left alone: records with a note a person wrote,
 records with another machine's mark, and anything starting with `norn ` that
 doesn't parse (a future version's mark, say). the one exception is adopting:
 a record with no comment at all, whose content already matches a declaration
@@ -74,18 +72,19 @@ cloudflare.dns."s3.cache.example.com".a = { };
 cloudflare.dns."grafana.example.com".a.proxied = true;
 ```
 
-records that don't belong to any one machine, like a domain's mail setup, go
-under `cloudflare.fleet.dns` in a module every machine imports:
+every record has exactly one machine that owns it. records no single service
+claims, like a domain's mail setup, go on the machine that serves them:
 
 ```nix
-cloudflare.fleet.dns."example.com" = {
+# the mail server's machine
+cloudflare.dns."example.com" = {
   mx = [ { exchange = "mail.example.com"; priority = 10; } ];
   txt = [ "v=spf1 -all" ];
 };
 ```
 
 `a` and `aaaa` take `addresses` (this machine's `cloudflare.address` when left
-out, so a fleet record has to name its own), `proxied` and `ttl`. `cname` takes
+out), `proxied` and `ttl`. `cname` takes
 a `target`, `mx` is a list of `{ exchange, priority }`, and `txt` is a list of
 strings. a ttl is `"auto"` (the default) or 60 to 86400 seconds, and a proxied
 record's ttl is always `"auto"`.
@@ -120,7 +119,6 @@ other. every build sees what every other machine claims, so a machine's build
 fails when:
 
 - two machines claim the same name and type.
-- the zones or the fleet records differ between machines.
 - a `CNAME` shares its name with anything, on any machine.
 - a machine declares records but doesn't run norn, so nothing would apply them.
 

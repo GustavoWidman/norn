@@ -1,17 +1,13 @@
 use crate::{
     dns::{Dns, Ttl},
     kind::{Live, Ownership, Plan, Step, Want, Why},
-    model::{HostName, Owner, Owners, Zone},
+    model::Zone,
     plan::{MAX_DELETES, plan},
 };
 
 use super::fixture::{
     WEB_1, WEB_2, apply, baseline, declare, host, mx, proxied, want, web_1, web_2, wire, zone,
 };
-
-fn owners(name: &str) -> Owners {
-    Owners::machine(HostName::parse(name).unwrap())
-}
 
 fn plan_zone(machine: &str, wants: &[Want<Dns>], zone: &Zone, live: Vec<Live<Dns>>) -> Plan<Dns> {
     let mut budget = MAX_DELETES;
@@ -20,7 +16,7 @@ fn plan_zone(machine: &str, wants: &[Want<Dns>], zone: &Zone, live: Vec<Live<Dns
         .filter(|want| want.scope == *zone)
         .cloned()
         .collect();
-    plan(&owners(machine), wants, live, &mut budget)
+    plan(&host(machine), wants, live, &mut budget)
 }
 
 fn lines(plan: &Plan<Dns>) -> Vec<String> {
@@ -43,7 +39,7 @@ fn verbs(plan: &Plan<Dns>) -> Vec<&'static str> {
 }
 
 fn assert_writes_only_its_own(machine: &str, plan: &Plan<Dns>) {
-    let owners = owners(machine);
+    let me = host(machine);
     for step in plan.steps.iter().chain(&plan.withheld) {
         match step {
             Step::Adopt { live, .. } => {
@@ -54,12 +50,12 @@ fn assert_writes_only_its_own(machine: &str, plan: &Plan<Dns>) {
                 );
             }
             Step::Update { live, .. } | Step::Delete { live, .. } => match &live.ownership {
-                Ownership::Marked(owner) => assert!(owners.contains(owner), "{step:?}"),
+                Ownership::Marked(owner) => assert_eq!(*owner, me, "{step:?}"),
                 other => panic!("{other:?} in {step:?}"),
             },
             Step::Create { .. } => {}
         }
-        assert!(owners.contains(step.owner()));
+        assert_eq!(*step.owner(), me);
     }
 }
 
@@ -240,7 +236,7 @@ fn the_delete_cap_holds_across_the_scopes_of_a_run() {
                     .live()
             })
             .collect();
-        let plan = plan(&owners(WEB_1), vec![], live, &mut budget);
+        let plan = plan(&me, vec![], live, &mut budget);
         deleted += plan
             .steps
             .iter()
@@ -365,21 +361,16 @@ fn an_address_change_is_one_update() {
 }
 
 #[test]
-fn duplicates_keep_the_oldest_on_every_machine() {
+fn duplicates_keep_the_oldest() {
+    let me = host(WEB_1);
     let com = zone("example.com");
-    let older = wire("A", "app.example.com", "192.0.2.1")
-        .marked(&Owner::Fleet)
-        .live();
-    let younger = wire("A", "app.example.com", "192.0.2.1")
-        .marked(&Owner::Fleet)
-        .live();
-    let wants = [want(&Owner::Fleet, "A", "app.example.com", "192.0.2.1")];
-    for machine in [WEB_1, WEB_2] {
-        let plan = plan_zone(machine, &wants, &com, vec![younger.clone(), older.clone()]);
-        match plan.steps.as_slice() {
-            [Step::Delete { live, .. }] => assert_eq!(live.handle, younger.handle),
-            other => panic!("{other:?}"),
-        }
+    let older = wire("A", "app.example.com", "192.0.2.1").marked(&me).live();
+    let younger = wire("A", "app.example.com", "192.0.2.1").marked(&me).live();
+    let wants = [want(&me, "A", "app.example.com", "192.0.2.1")];
+    let plan = plan_zone(WEB_1, &wants, &com, vec![younger.clone(), older]);
+    match plan.steps.as_slice() {
+        [Step::Delete { live, .. }] => assert_eq!(live.handle, younger.handle),
+        other => panic!("{other:?}"),
     }
 }
 

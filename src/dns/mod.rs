@@ -107,17 +107,10 @@ impl Kind for Dns {
         match (sent, step) {
             (Ok(_), _) => Ok(()),
             (Err(ApiError::NotFound), Step::Delete { .. }) => Ok(()),
-            (Err(ApiError::Rejected { errors, .. }), Step::Create { .. })
-                if errors.iter().any(|(code, _)| *code == IDENTICAL_RECORD) =>
-            {
-                Ok(())
-            }
             (Err(error), _) => Err(error),
         }
     }
 }
-
-const IDENTICAL_RECORD: u32 = 81058;
 
 pub(crate) struct Reported<'a> {
     pub id: &'a str,
@@ -156,6 +149,6 @@ impl Reported<'_> {
 }
 
 #[cfg(test)]
-pub(crate) fn mark(owner: &crate::model::Owner) -> String {
+pub(crate) fn mark(owner: &crate::model::HostName) -> String {
     mark::write(owner)
 }

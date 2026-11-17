@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     desired::Mode,
-    model::Owner,
     run::{Line, What},
 };
 
@@ -21,8 +20,6 @@ pub(crate) struct Status {
     pub health: Health,
     pub counts: Counts,
     pub troubled_since: Option<DateTime<Utc>>,
-    pub contested: Vec<String>,
-    pub rewrote: Vec<String>,
     pub lines: Vec<String>,
 }
 
@@ -87,7 +84,6 @@ pub(crate) struct Summary {
     pub health: Health,
     pub counts: Counts,
     lines: Vec<String>,
-    rewrote: Vec<String>,
     desired: Option<String>,
     mode: Option<&'static str>,
 }
@@ -98,7 +94,6 @@ impl Summary {
             health,
             counts: Counts::default(),
             lines: vec![message],
-            rewrote: vec![],
             desired: None,
             mode: None,
         }
@@ -107,19 +102,13 @@ impl Summary {
     pub fn of(lines: &[Line]) -> Self {
         let mut counts = Counts::default();
         let mut shown = Vec::new();
-        let mut rewrote = Vec::new();
         for line in lines {
             let subject = line.subject();
             match &line.what {
                 What::Kept => counts.kept += 1,
                 What::Untouched { .. } => counts.untouched += 1,
                 What::Foreign(_) => counts.foreign += 1,
-                What::Applied(verb) => {
-                    counts.applied += 1;
-                    if line.owner == Some(Owner::Fleet) && matches!(*verb, "update" | "create") {
-                        rewrote.push(subject);
-                    }
-                }
+                What::Applied(_) => counts.applied += 1,
                 What::Planned(verb) => {
                     counts.held += 1;
                     shown.push(format!("held: {verb} {subject}"));
@@ -157,7 +146,6 @@ impl Summary {
             health,
             counts,
             lines: shown,
-            rewrote,
             desired: None,
             mode: None,
         }
@@ -180,16 +168,6 @@ pub(crate) fn record(state_dir: &Path, summary: &Summary) {
             .and_then(|previous| previous.troubled_since)
             .unwrap_or(now)
     });
-    let contested = summary
-        .rewrote
-        .iter()
-        .filter(|subject| {
-            previous
-                .as_ref()
-                .is_some_and(|previous| previous.rewrote.contains(subject))
-        })
-        .cloned()
-        .collect();
     let status = Status {
         finished: now,
         desired: summary.desired.clone(),
@@ -197,8 +175,6 @@ pub(crate) fn record(state_dir: &Path, summary: &Summary) {
         health: summary.health,
         counts: summary.counts,
         troubled_since,
-        contested,
-        rewrote: summary.rewrote.clone(),
         lines: summary.lines.clone(),
     };
     if let Err(error) = write(state_dir, &status) {
@@ -240,9 +216,6 @@ impl Status {
             text.push_str(&format!("troubled since {}\n", since.to_rfc3339()));
         }
         text.push_str(&format!("{}\n", self.counts));
-        for subject in &self.contested {
-            text.push_str(&format!("contested: {subject}\n"));
-        }
         for line in &self.lines {
             text.push_str(&format!("{line}\n"));
         }
