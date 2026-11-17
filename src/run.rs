@@ -13,8 +13,9 @@ use crate::{
     cloudflare::{Api, ApiError, Capability, Clock, Read, Token, TokenError, Write},
     desired::{Desired, Mode, Problems, Wants},
     dns::Dns,
-    kind::{Kind, Ladder, Live, Ownership, Plan, Step, Want, Withhold},
-    model::HostName,
+    gate::{self, Deletes, Permit, Rollout, RolloutFile},
+    kind::{Kind, Ladder, Live, Mark, Ownership, Plan, Sent, Step, Want, Withhold},
+    model::{HostName, Owner, Revision},
     plan::plan,
 };
 
@@ -80,6 +81,7 @@ pub fn converge(
     state_dir: &Path,
     timing: Timing,
     max_deletes: usize,
+    rollout: Option<&RolloutFile>,
 ) -> eyre::Result<()> {
     owner_only(state_dir, rustix::process::geteuid().as_raw())?;
     let crash_dir = state_dir.to_owned();
@@ -114,6 +116,7 @@ pub fn converge(
         state_dir,
         timing,
         max_deletes,
+        rollout,
     );
     Ok(())
 }
@@ -147,6 +150,7 @@ pub(crate) fn converge_with(
     state_dir: &Path,
     timing: Timing,
     max_deletes: usize,
+    rollout: Option<&RolloutFile>,
 ) -> crate::status::Health {
     let summary = 'run: {
         let desired = match Desired::read(desired_path) {
@@ -198,12 +202,13 @@ pub(crate) fn converge_with(
         };
 
         let started = Instant::now();
-        let lines = match desired.mode {
+        let rollout = Rollout::read(rollout, chrono::Utc::now());
+        let (lines, gate) = match desired.mode {
             Mode::Report => {
                 let api = cloudflare.reader(token, timing.clock());
                 let mut show = Show::default();
-                visit(&api, &desired, max_deletes, &mut show);
-                show.lines
+                let gate = visit(&api, &desired, &rollout, max_deletes, &mut show);
+                (show.lines, gate)
             }
             Mode::Write(ladder) => {
                 let api = cloudflare.writer(token, timing.clock());
@@ -212,10 +217,13 @@ pub(crate) fn converge_with(
                     ladder,
                     lines: Vec::new(),
                 };
-                visit(&api, &desired, max_deletes, &mut apply);
-                apply.lines
+                let gate = visit(&api, &desired, &rollout, max_deletes, &mut apply);
+                (apply.lines, gate)
             }
         };
+        if let Some(gate) = &gate {
+            log::info!("fleet scope: {gate}");
+        }
         for line in &lines {
             line.log();
         }
@@ -241,6 +249,7 @@ pub fn report(
     token_file: Option<&Path>,
     timing: Timing,
     max_deletes: usize,
+    rollout: Option<&RolloutFile>,
     verbose: bool,
 ) -> eyre::Result<()> {
     let (text, complete) = report_with(
@@ -249,6 +258,7 @@ pub fn report(
         token_file,
         timing,
         max_deletes,
+        rollout,
         verbose,
     )?;
     print!("{text}");
@@ -267,6 +277,7 @@ pub(crate) fn report_with(
     token_file: Option<&Path>,
     timing: Timing,
     max_deletes: usize,
+    rollout: Option<&RolloutFile>,
     verbose: bool,
 ) -> eyre::Result<(String, bool)> {
     let desired = Desired::read(desired_path).map_err(|problems| eyre!("{problems}"))?;
@@ -275,15 +286,22 @@ pub(crate) fn report_with(
     let token =
         Token::read(token_file).map_err(|error| eyre!("{}: {error}", token_file.display()))?;
     let started = Instant::now();
+    let rollout = Rollout::read(rollout, chrono::Utc::now());
     let api = cloudflare.reader(token, timing.clock());
     let mut show = Show::default();
-    visit(&api, &desired, max_deletes, &mut show);
+    let gate = visit(&api, &desired, &rollout, max_deletes, &mut show);
     let complete = !show
         .lines
         .iter()
         .any(|line| matches!(line.what, What::Unread(_)));
     Ok((
-        crate::report::render(&desired, &show.lines, started.elapsed(), verbose),
+        crate::report::render(
+            &desired,
+            gate.as_ref(),
+            &show.lines,
+            started.elapsed(),
+            verbose,
+        ),
         complete,
     ))
 }
@@ -316,7 +334,7 @@ pub(crate) struct Line {
     pub kind: &'static str,
     pub scope: String,
     pub what: What,
-    pub owner: Option<HostName>,
+    pub owner: Option<String>,
     pub key: String,
     pub value: String,
 }
@@ -324,21 +342,29 @@ pub(crate) struct Line {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum What {
     Planned(&'static str),
+    /// withheld in the normal course of a fleet rollout
+    Held(&'static str, String),
     Applied(&'static str),
+    /// another machine wrote the same shared object first
+    Raced(&'static str),
     Failed(&'static str, String),
     Withheld(String),
     Blocked(String),
     Unread(String),
     Kept,
-    Untouched { annotated: bool },
+    Untouched {
+        annotated: bool,
+    },
     Foreign(String),
 }
+
+pub(crate) const RACED: &str = "another machine wrote it first; the next run reads what is there";
 
 impl Line {
     fn of<K: Kind>(
         scope: &K::Scope,
         what: What,
-        owner: Option<&HostName>,
+        owner: Option<String>,
         key: &K::Key,
         value: String,
     ) -> Self {
@@ -346,7 +372,7 @@ impl Line {
             kind: K::NAME,
             scope: scope.to_string(),
             what,
-            owner: owner.cloned(),
+            owner,
             key: key.to_string(),
             value,
         }
@@ -356,7 +382,7 @@ impl Line {
         Self::of::<K>(
             scope,
             what,
-            Some(step.owner()),
+            Some(step.owner().to_string()),
             &step.key(),
             step.describe(),
         )
@@ -388,6 +414,8 @@ impl Line {
         match &self.what {
             What::Applied(verb) => log::info!("{verb} {subject}"),
             What::Planned(verb) => log::info!("held ({verb}) {subject}"),
+            What::Held(verb, why) => log::info!("held ({verb}) {subject}: {why}"),
+            What::Raced(verb) => log::info!("raced ({verb}) {subject}: {RACED}"),
             What::Failed(verb, why) => log::error!("failed to {verb} {subject}: {why}"),
             What::Withheld(why) => log::warn!("withheld delete {subject}: {why}"),
             What::Blocked(why) => log::warn!("blocked {subject}: {why}"),
@@ -396,53 +424,71 @@ impl Line {
         }
     }
 
-    fn plan<K: Kind>(
+    /// one scope's lines, from the plans of every owner over it. an object
+    /// no plan claims is listed once, as the first plan sees it.
+    fn plans<K: Kind>(
         scope: &K::Scope,
-        plan: &Plan<K>,
-        steps: &mut dyn FnMut(&Step<K>) -> What,
+        plans: &[Plan<K>],
+        steps: &mut dyn FnMut(&Plan<K>, &Step<K>) -> What,
     ) -> Vec<Line> {
-        let mut lines: Vec<Line> = plan
-            .steps
-            .iter()
-            .map(|step| Line::step(scope, step, steps(step)))
-            .collect();
-        lines.extend(plan.withheld.iter().map(|withheld| {
-            Line::step(
-                scope,
-                &withheld.step,
-                What::Withheld(withheld.why.explain()),
-            )
-        }));
-        lines.extend(plan.blocked.iter().map(|blocked| {
-            Line::of::<K>(
-                scope,
-                What::Blocked(format!(
+        let mut lines = Vec::new();
+        for plan in plans {
+            lines.extend(
+                plan.steps
+                    .iter()
+                    .map(|step| Line::step(scope, step, steps(plan, step))),
+            );
+            lines.extend(plan.withheld.iter().map(|withheld| {
+                let what = if withheld.why.holds() {
+                    What::Held(withheld.step.verb(), withheld.why.explain())
+                } else {
+                    What::Withheld(withheld.why.explain())
+                };
+                Line::step(scope, &withheld.step, what)
+            }));
+            lines.extend(plan.blocked.iter().map(|blocked| {
+                let why = format!(
                     "{}; there now: {} {}",
                     blocked.why.explain(),
                     blocked.by.key,
                     shown(&blocked.by)
-                )),
-                Some(&blocked.owner),
-                &K::key(&blocked.want),
-                blocked.want.to_string(),
-            )
-        }));
-        lines.extend(plan.kept.iter().map(|live| {
-            let mut line = Line::live(scope, live, What::Kept);
-            if let Ownership::Marked(owner) = &live.ownership {
-                line.owner = Some(owner.clone());
-            }
-            line
-        }));
-        lines.extend(plan.untouched.iter().map(|live| {
+                );
+                Line::of::<K>(
+                    scope,
+                    if blocked.why.holds() {
+                        What::Held("create", why)
+                    } else {
+                        What::Blocked(why)
+                    },
+                    Some(blocked.owner.to_string()),
+                    &K::key(&blocked.want),
+                    blocked.want.to_string(),
+                )
+            }));
+            lines.extend(plan.kept.iter().map(|live| {
+                let mut line = Line::live(scope, live, What::Kept);
+                line.owner = match &live.ownership {
+                    Ownership::Host(owner) => Some(owner.to_string()),
+                    Ownership::Fleet(stamp) => Some(format!("fleet t={}", stamp.revision)),
+                    Ownership::Unmarked { .. } | Ownership::Unreadable(_) => None,
+                };
+                line
+            }));
+        }
+        let Some((first, others)) = plans.split_first() else {
+            return lines;
+        };
+        let unclaimed = |live: &&Live<K>| !others.iter().any(|plan| plan.claims(&live.handle));
+        lines.extend(first.untouched.iter().filter(unclaimed).map(|live| {
             let annotated = live.ownership == (Ownership::Unmarked { annotated: true });
             Line::live(scope, live, What::Untouched { annotated })
         }));
-        lines.extend(plan.foreign.iter().map(|live| {
+        lines.extend(first.foreign.iter().filter(unclaimed).map(|live| {
             let whose = match (&live.ownership, &live.value) {
                 (Ownership::Unreadable(mark), _) => format!("unreadable mark {mark:?}"),
                 (_, None) => "a shape norn does not model".to_owned(),
-                (Ownership::Marked(owner), _) => format!("{owner}'s"),
+                (Ownership::Host(owner), _) => format!("{owner}'s"),
+                (Ownership::Fleet(_), _) => "the fleet's".to_owned(),
                 (Ownership::Unmarked { .. }, _) => "unmarked".to_owned(),
             };
             Line::live(scope, live, What::Foreign(whose))
@@ -464,13 +510,15 @@ trait Act {
 
 struct Planned<K: Kind> {
     scopes: Vec<Scoped<K>>,
+    /// the mark the fleet's plans write, when the gate permits them to
+    fleet: Option<Mark>,
 }
 
 enum Scoped<K: Kind> {
     Read {
         scope: K::Scope,
         place: K::Place,
-        plan: Plan<K>,
+        plans: Vec<Plan<K>>,
     },
     Unread {
         scope: K::Scope,
@@ -487,10 +535,11 @@ impl Act for Show {
     fn on<K: Kind>(&mut self, planned: Planned<K>) {
         for scoped in planned.scopes {
             match scoped {
-                Scoped::Read { scope, plan, .. } => {
-                    self.lines.extend(Line::plan(&scope, &plan, &mut |step| {
-                        What::Planned(step.verb())
-                    }));
+                Scoped::Read { scope, plans, .. } => {
+                    self.lines
+                        .extend(Line::plans(&scope, &plans, &mut |_, step| {
+                            What::Planned(step.verb())
+                        }));
                 }
                 Scoped::Unread { scope, error } => self.lines.push(unread::<K>(&scope, &error)),
             }
@@ -508,17 +557,27 @@ impl Act for Apply<'_> {
     fn on<K: Kind>(&mut self, planned: Planned<K>) {
         for scoped in planned.scopes {
             match scoped {
-                Scoped::Read { scope, place, plan } => {
+                Scoped::Read {
+                    scope,
+                    place,
+                    plans,
+                } => {
                     let (api, ladder) = (self.api, self.ladder);
-                    self.lines.extend(Line::plan(&scope, &plan, &mut |step| {
-                        if !ladder.permits(step.rung()) {
-                            return What::Planned(step.verb());
-                        }
-                        match K::write(api, &place, step) {
-                            Ok(()) => What::Applied(step.verb()),
-                            Err(error) => What::Failed(step.verb(), error.to_string()),
-                        }
-                    }));
+                    self.lines
+                        .extend(Line::plans(&scope, &plans, &mut |plan, step| {
+                            let mark = match &plan.owner {
+                                Owner::Host(host) => Some(Mark::Host(host.clone())),
+                                Owner::Fleet => planned.fleet.clone(),
+                            };
+                            let Some(mark) = mark.filter(|_| ladder.permits(step.rung())) else {
+                                return What::Planned(step.verb());
+                            };
+                            match K::write(api, &place, step, &mark) {
+                                Ok(Sent::Applied) => What::Applied(step.verb()),
+                                Ok(Sent::Raced) => What::Raced(step.verb()),
+                                Err(error) => What::Failed(step.verb(), error.to_string()),
+                            }
+                        }));
                 }
                 Scoped::Unread { scope, error } => self.lines.push(unread::<K>(&scope, &error)),
             }
@@ -537,25 +596,39 @@ fn unread<K: Kind>(scope: &K::Scope, error: &ApiError) -> Line {
     }
 }
 
-fn visit<C: Capability>(api: &Api<C>, desired: &Desired, max_deletes: usize, act: &mut impl Act) {
+/// returns what the fleet gate decided, when shared records matter to this
+/// run
+fn visit<C: Capability>(
+    api: &Api<C>,
+    desired: &Desired,
+    rollout: &Rollout,
+    max_deletes: usize,
+    act: &mut impl Act,
+) -> Option<Permit> {
     let Wants { dns } = desired.wants();
     let zones = desired.zones.iter().cloned().collect();
-    act.on(plan_kind::<Dns, C>(
+    let (gate, planned) = plan_kind::<Dns, C>(
         api,
         &desired.host,
+        desired.fleet.revision,
+        rollout,
         zones,
         dns,
         max_deletes,
-    ));
+    );
+    act.on(planned);
+    gate
 }
 
 fn plan_kind<K: Kind, C: Capability>(
     api: &Api<C>,
-    owner: &HostName,
+    host: &HostName,
+    revision: Option<Revision>,
+    rollout: &Rollout,
     scopes: Vec<K::Scope>,
     wants: Vec<Want<K>>,
     max_deletes: usize,
-) -> Planned<K> {
+) -> (Option<Permit>, Planned<K>) {
     let read: Vec<_> = scopes
         .into_iter()
         .map(|scope| {
@@ -563,21 +636,51 @@ fn plan_kind<K: Kind, C: Capability>(
             (scope, read)
         })
         .collect();
+    let newest = read
+        .iter()
+        .filter_map(|(_, read)| read.as_ref().ok())
+        .flat_map(|(_, live)| live)
+        .filter_map(|live| match live.ownership {
+            Ownership::Fleet(stamp) => Some(stamp.revision),
+            _ => None,
+        })
+        .max();
+    let unread = read.iter().any(|(_, read)| read.is_err());
+    let permit = gate::permit(revision, newest, rollout, unread);
+    let (deletes, hold, fleet) = match &permit {
+        Permit::Write { revision, deletes } => (*deletes, None, Some(Mark::Fleet(*revision))),
+        Permit::Hold(hold) => (Deletes::Never, Some(Withhold::Fleet(hold.clone())), None),
+    };
+    let shared = revision.is_some()
+        || newest.is_some()
+        || wants.iter().any(|want| want.owner == Owner::Fleet);
+    if let (true, Rollout::Unknown(why)) = (shared, rollout) {
+        log::warn!("the fleet's rollout is unknown: {why}");
+    }
+    let owners = [Owner::Host(host.clone()), Owner::Fleet];
+
     let plan_all = |breaker: Option<&Withhold>| -> Vec<Scoped<K>> {
         read.iter()
             .map(|(scope, read)| match read {
-                Ok((place, live)) => {
-                    let mine = wants
+                Ok((place, live)) => Scoped::Read {
+                    scope: scope.clone(),
+                    place: place.clone(),
+                    plans: owners
                         .iter()
-                        .filter(|want| want.scope == *scope)
-                        .cloned()
-                        .collect();
-                    Scoped::Read {
-                        scope: scope.clone(),
-                        place: place.clone(),
-                        plan: plan(owner, mine, live.clone(), breaker),
-                    }
-                }
+                        .map(|owner| {
+                            let mine = wants
+                                .iter()
+                                .filter(|want| want.scope == *scope && want.owner == *owner)
+                                .cloned()
+                                .collect();
+                            let mut plan = plan(owner, mine, live.clone(), breaker, deletes);
+                            if let (Owner::Fleet, Some(hold)) = (owner, &hold) {
+                                plan.hold(hold.clone());
+                            }
+                            plan
+                        })
+                        .collect(),
+                },
                 Err(error) => Scoped::Unread {
                     scope: scope.clone(),
                     error: error.clone(),
@@ -588,15 +691,13 @@ fn plan_kind<K: Kind, C: Capability>(
     let scopes = plan_all(None);
     let planned = scopes
         .iter()
-        .map(|scoped| match scoped {
-            Scoped::Read { plan, .. } => plan
-                .steps
-                .iter()
-                .filter(|step| matches!(step, Step::Delete { .. }))
-                .count(),
-            Scoped::Unread { .. } => 0,
+        .flat_map(|scoped| match scoped {
+            Scoped::Read { plans, .. } => plans.as_slice(),
+            Scoped::Unread { .. } => &[],
         })
-        .sum();
+        .flat_map(|plan| &plan.steps)
+        .filter(|step| matches!(step, Step::Delete { .. }))
+        .count();
     let scopes = if planned > max_deletes {
         plan_all(Some(&Withhold::Breaker {
             planned,
@@ -605,7 +706,7 @@ fn plan_kind<K: Kind, C: Capability>(
     } else {
         scopes
     };
-    Planned { scopes }
+    (shared.then_some(permit), Planned { scopes, fleet })
 }
 
 pub(crate) struct Lock {

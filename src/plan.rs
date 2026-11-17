@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    gate::Deletes,
     kind::{Blocked, Kind, Live, Ownership, Plan, Step, Want, Why, Withheld, Withhold},
-    model::HostName,
+    model::Owner,
 };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -10,12 +11,15 @@ enum Fate {
     Open,
     Kept,
     Written,
+    /// a shared object no longer declared, retired or waiting to be deleted;
+    /// it keeps serving until then
+    Retiring,
     Deleted,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Turn<N> {
-    Adopt,
+    Mark,
     Update,
     AtName(N, Change),
 }
@@ -26,11 +30,15 @@ enum Change {
     Create,
 }
 
+/// brings `owner`'s objects in line with `wants`. objects with any other
+/// owner are someone else's. a shared object no longer declared is retired
+/// first, and deleted only once `deletes` permits its stamp.
 pub(crate) fn plan<K: Kind>(
-    owner: &HostName,
+    owner: &Owner,
     wants: Vec<Want<K>>,
     mut live: Vec<Live<K>>,
     breaker: Option<&Withhold>,
+    deletes: Deletes,
 ) -> Plan<K> {
     live.sort_by(|a, b| a.born.cmp(&b.born));
     let mut fate = vec![Fate::Open; live.len()];
@@ -45,9 +53,7 @@ pub(crate) fn plan<K: Kind>(
     }
     let mut held: BTreeMap<K::Key, Vec<usize>> = BTreeMap::new();
     for (index, object) in live.iter().enumerate() {
-        if let (Ownership::Marked(marked), Some(_)) = (&object.ownership, &object.value)
-            && marked == owner
-        {
+        if object.value.is_some() && object.ownership.owner().as_ref() == Some(owner) {
             held.entry(object.key.clone()).or_default().push(index);
         }
     }
@@ -66,7 +72,8 @@ pub(crate) fn plan<K: Kind>(
     };
     let mut steps = Vec::new();
     let mut blocked = Vec::new();
-    let mut deletes = Vec::new();
+    let mut withheld = Vec::new();
+    let mut doomed = Vec::new();
     let mut creates = Vec::new();
 
     for key in slots {
@@ -89,7 +96,17 @@ pub(crate) fn plan<K: Kind>(
             match found {
                 Some(position) => {
                     let index = mine.remove(position);
-                    if *value(index) == want {
+                    let retiring = matches!(
+                        live[index].ownership,
+                        Ownership::Fleet(stamp) if stamp.retiring
+                    );
+                    if *value(index) == want && retiring {
+                        fate[index] = Fate::Written;
+                        steps.push(Step::Restore {
+                            owner: owner.clone(),
+                            live: live[index].clone(),
+                        });
+                    } else if *value(index) == want {
                         fate[index] = Fate::Kept;
                     } else {
                         fate[index] = Fate::Written;
@@ -140,7 +157,8 @@ pub(crate) fn plan<K: Kind>(
                     Why::Annotated
                 }
                 Ownership::Unmarked { .. } => Why::Differs,
-                Ownership::Marked(other) => Why::Owned(other.clone()),
+                Ownership::Host(other) => Why::Owned(Owner::Host(other.clone())),
+                Ownership::Fleet(_) => Why::Owned(Owner::Fleet),
                 Ownership::Unreadable(_) => Why::Unreadable,
             };
             blocked.push(Blocked {
@@ -165,7 +183,31 @@ pub(crate) fn plan<K: Kind>(
                 None => creates.push(want),
             }
         }
-        deletes.extend(leftover);
+        for index in leftover {
+            match live[index].ownership {
+                Ownership::Fleet(stamp) if !stamp.retiring => {
+                    fate[index] = Fate::Retiring;
+                    steps.push(Step::Retire {
+                        owner: owner.clone(),
+                        live: live[index].clone(),
+                    });
+                }
+                Ownership::Fleet(stamp) if !deletes.permit(stamp.revision) => {
+                    fate[index] = Fate::Retiring;
+                    withheld.push(Withheld {
+                        step: Step::Delete {
+                            owner: owner.clone(),
+                            live: live[index].clone(),
+                        },
+                        why: Withhold::Retiring {
+                            dropped: stamp.revision,
+                            deletes,
+                        },
+                    });
+                }
+                _ => doomed.push(index),
+            }
+        }
     }
 
     let obstacle = |fate: &[Fate], want: &K::Value| {
@@ -177,13 +219,17 @@ pub(crate) fn plan<K: Kind>(
         let excluder = (0..live.len())
             .filter(stays)
             .find(|&index| live[index].key != key && K::excludes(&key, &live[index].key));
+        let excludes = |index: usize| match fate[index] {
+            Fate::Retiring => (index, Why::Retiring),
+            _ => (index, Why::Excludes),
+        };
         occupant
             .map(|index| (index, Why::Occupied))
-            .or(excluder.map(|index| (index, Why::Excludes)))
+            .or(excluder.map(excludes))
     };
 
     let mut deleted = fate.clone();
-    for &index in &deletes {
+    for &index in &doomed {
         deleted[index] = Fate::Deleted;
     }
     let blocked_names: BTreeSet<K::Name> = blocked
@@ -197,8 +243,7 @@ pub(crate) fn plan<K: Kind>(
         .map(|want| K::name(&K::key(want)))
         .collect();
 
-    let mut withheld = Vec::new();
-    for index in deletes {
+    for index in doomed {
         let step = Step::Delete {
             owner: owner.clone(),
             live: live[index].clone(),
@@ -237,16 +282,15 @@ pub(crate) fn plan<K: Kind>(
 
     let order = |step: &Step<K>| {
         let turn = match step {
-            Step::Adopt { .. } => Turn::Adopt,
+            Step::Adopt { .. } | Step::Retire { .. } | Step::Restore { .. } => Turn::Mark,
             Step::Update { .. } => Turn::Update,
             Step::Delete { .. } => Turn::AtName(K::name(&step.key()), Change::Delete),
             Step::Create { .. } => Turn::AtName(K::name(&step.key()), Change::Create),
         };
-        let identity = match step {
-            Step::Adopt { live, .. } | Step::Update { live, .. } | Step::Delete { live, .. } => {
-                live.value.as_ref().map(K::identity)
-            }
-            Step::Create { want, .. } => Some(K::identity(want)),
+        let identity = match (step, step.live()) {
+            (_, Some(live)) => live.value.as_ref().map(K::identity),
+            (Step::Create { want, .. }, None) => Some(K::identity(want)),
+            (_, None) => None,
         };
         (turn, step.key(), identity)
     };
@@ -261,7 +305,7 @@ pub(crate) fn plan<K: Kind>(
     for (object, fate) in live.into_iter().zip(fate) {
         match (fate, &object.ownership) {
             (Fate::Kept, _) => kept.push(object),
-            (Fate::Written | Fate::Deleted, _) => {}
+            (Fate::Written | Fate::Retiring | Fate::Deleted, _) => {}
             (Fate::Open, Ownership::Unmarked { .. }) => untouched.push(object),
             (Fate::Open, _) => foreign.push(object),
         }
@@ -271,6 +315,7 @@ pub(crate) fn plan<K: Kind>(
     }
 
     Plan {
+        owner: owner.clone(),
         steps,
         blocked,
         withheld,

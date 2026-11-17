@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Record, mark};
-use crate::model::HostName;
+use crate::kind::Mark;
 
 #[derive(Deserialize)]
 pub(super) struct Zone {
@@ -42,11 +42,11 @@ pub(super) struct Body {
 }
 
 #[derive(Serialize)]
-pub(super) struct Mark {
+pub(super) struct Comment {
     pub comment: String,
 }
 
-pub(super) fn body(record: &Record, owner: &HostName) -> Body {
+pub(super) fn body(record: &Record, mark: &Mark) -> Body {
     Body {
         kind: record.data.record_type().as_str().to_owned(),
         name: record.name.to_string(),
@@ -54,17 +54,17 @@ pub(super) fn body(record: &Record, owner: &HostName) -> Body {
         proxied: record.data.reach().map(|reach| reach.proxied()),
         ttl: record.data.ttl().to_wire(),
         priority: record.data.priority(),
-        comment: mark::write(owner),
+        comment: mark::write(mark, false),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dns::Ttl;
+    use crate::{dns::Ttl, model::HostName};
 
-    fn web() -> HostName {
-        HostName::parse("web-1").unwrap()
+    fn web() -> Mark {
+        Mark::Host(HostName::parse("web-1").unwrap())
     }
 
     #[test]

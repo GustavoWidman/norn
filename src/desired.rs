@@ -1,12 +1,16 @@
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+};
 
 use crate::{
     dns::{Dns, Record, RecordType, Slot},
     kind::{Ladder, Want},
-    model::{Fqdn, HostName, Zones},
+    model::{Fqdn, HostName, Owner, Revision, Zones},
 };
 
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -29,6 +33,15 @@ pub(crate) struct Desired {
     pub host: HostName,
     pub mode: Mode,
     pub zones: Zones,
+    pub dns: Vec<Record>,
+    pub fleet: Fleet,
+}
+
+/// the records every machine of the fleet declares alike
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(crate) struct Fleet {
+    /// none for a configuration built from an uncommitted tree
+    pub revision: Option<Revision>,
     pub dns: Vec<Record>,
 }
 
@@ -117,33 +130,43 @@ impl Desired {
             })
             .ok();
 
-        let mut dns = Vec::new();
-        for declared in &document.dns {
-            let subject = format!("dns {} {}", declared.name, declared.kind);
-            let record = declared.ttl.parse().and_then(|ttl| {
-                Record::declared(
-                    &declared.name,
-                    &declared.kind,
-                    &declared.content,
-                    declared.proxied,
-                    ttl,
-                    declared.priority,
-                )
-            });
-            match (record, &zones) {
-                (Err(message), _) => problem(&subject, message),
-                (Ok(record), Some(zones)) if zones.zone_of(&record.name).is_none() => {
-                    problem(
-                        &subject,
-                        format!("{} is outside every managed zone ({zones})", record.name),
-                    );
+        let mut records = |rows: &[document::Record], scope: &str| {
+            let mut records = Vec::new();
+            for declared in rows {
+                let subject = format!("{scope} {} {}", declared.name, declared.kind);
+                let record = declared.ttl.parse().and_then(|ttl| {
+                    Record::declared(
+                        &declared.name,
+                        &declared.kind,
+                        &declared.content,
+                        declared.proxied,
+                        ttl,
+                        declared.priority,
+                    )
+                });
+                match (record, &zones) {
+                    (Err(message), _) => problem(&subject, message),
+                    (Ok(record), Some(zones)) if zones.zone_of(&record.name).is_none() => {
+                        problem(
+                            &subject,
+                            format!("{} is outside every managed zone ({zones})", record.name),
+                        );
+                    }
+                    (Ok(record), _) => records.push(record),
                 }
-                (Ok(record), _) => dns.push(record),
             }
-        }
-
-        dns.sort_by_key(|record| (record.slot(), record.data.content()));
-        for (subject, message) in collisions(&dns) {
+            records.sort_by_key(|record| (record.slot(), record.data.content()));
+            for (subject, message) in collisions(scope, &records) {
+                problem(&subject, message);
+            }
+            records
+        };
+        let dns = records(&document.dns, "dns");
+        let fleet = Fleet {
+            revision: document.fleet.revision.map(Revision),
+            dns: records(&document.fleet.dns, "fleet dns"),
+        };
+        for (subject, message) in across(&dns, &fleet.dns) {
             problem(&subject, message);
         }
 
@@ -153,6 +176,7 @@ impl Desired {
                 mode,
                 zones,
                 dns,
+                fleet,
             }),
             _ => Err(Problems(problems)),
         }
@@ -165,6 +189,10 @@ impl Desired {
             mode: self.mode.as_str().to_owned(),
             zones: self.zones.iter().map(ToString::to_string).collect(),
             dns: self.dns.iter().map(document::Record::from).collect(),
+            fleet: document::Fleet {
+                revision: self.fleet.revision.map(|Revision(revision)| revision),
+                dns: self.fleet.dns.iter().map(document::Record::from).collect(),
+            },
         };
         let mut text = serde_json::to_string_pretty(&document).expect("the document serializes");
         text.push('\n');
@@ -172,16 +200,16 @@ impl Desired {
     }
 
     pub fn wants(&self) -> Wants {
-        let dns = self
-            .dns
-            .iter()
-            .map(|record| Want {
+        let host = Owner::Host(self.host.clone());
+        let dns = (self.dns.iter().map(|record| (&host, record)))
+            .chain(self.fleet.dns.iter().map(|record| (&Owner::Fleet, record)))
+            .map(|(owner, record)| Want {
                 scope: self
                     .zones
                     .zone_of(&record.name)
                     .expect("parse checked every name's zone")
                     .clone(),
-                owner: self.host.clone(),
+                owner: owner.clone(),
                 value: record.clone(),
             })
             .collect();
@@ -189,14 +217,14 @@ impl Desired {
     }
 }
 
-fn collisions(records: &[Record]) -> Vec<(String, String)> {
+fn collisions(scope: &str, records: &[Record]) -> Vec<(String, String)> {
     let mut found = Vec::new();
     let mut slots: BTreeMap<Slot, Vec<&Record>> = BTreeMap::new();
     for record in records {
         slots.entry(record.slot()).or_default().push(record);
     }
     for (slot, records) in &slots {
-        let subject = format!("dns {} {}", slot.name, slot.kind.as_str());
+        let subject = format!("{scope} {} {}", slot.name, slot.kind.as_str());
         let mut contents: Vec<_> = records.iter().map(|record| record.data.content()).collect();
         contents.sort();
         if contents.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -221,10 +249,46 @@ fn collisions(records: &[Record]) -> Vec<(String, String)> {
             .collect();
         if kinds.contains(&"CNAME") && !others.is_empty() {
             found.push((
-                format!("dns {name} CNAME"),
+                format!("{scope} {name} CNAME"),
                 format!(
                     "a CNAME shares its name with nothing, and {name} also declares {}",
                     others.join(", ")
+                ),
+            ));
+        }
+    }
+    found
+}
+
+/// a name and type has one owner, and a CNAME shares its name with nothing,
+/// whether this machine or the fleet declares what is beside it
+fn across(host: &[Record], fleet: &[Record]) -> Vec<(String, String)> {
+    let slots = |records: &[Record]| records.iter().map(Record::slot).collect::<BTreeSet<_>>();
+    let (host, fleet) = (slots(host), slots(fleet));
+    let subject = |slot: &Slot| format!("fleet dns {} {}", slot.name, slot.kind.as_str());
+    let mut found: Vec<_> = host
+        .intersection(&fleet)
+        .map(|slot| {
+            (
+                subject(slot),
+                "this machine declares it too; one name and type has one owner".into(),
+            )
+        })
+        .collect();
+    for slot in &fleet {
+        let beside: Vec<&str> = host
+            .iter()
+            .filter(|other| other.name == slot.name && other.kind != slot.kind)
+            .filter(|other| slot.kind == RecordType::Cname || other.kind == RecordType::Cname)
+            .map(|other| other.kind.as_str())
+            .collect();
+        if !beside.is_empty() {
+            found.push((
+                subject(slot),
+                format!(
+                    "a CNAME shares its name with nothing, and this machine declares {} at {}",
+                    beside.join(", "),
+                    slot.name
                 ),
             ));
         }
@@ -249,6 +313,14 @@ mod document {
         pub host: String,
         pub mode: String,
         pub zones: Vec<String>,
+        pub dns: Vec<Record>,
+        pub fleet: Fleet,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Fleet {
+        pub revision: Option<u64>,
         pub dns: Vec<Record>,
     }
 
@@ -314,12 +386,21 @@ mod tests {
     use super::*;
 
     fn document(dns: serde_json::Value) -> serde_json::Value {
+        shared(dns, json!(null), json!([]))
+    }
+
+    fn shared(
+        dns: serde_json::Value,
+        revision: serde_json::Value,
+        fleet: serde_json::Value,
+    ) -> serde_json::Value {
         json!({
-            "schema": 2,
+            "schema": 3,
             "host": "web-1",
             "mode": "report",
             "zones": ["example.com", "example.org"],
             "dns": dns,
+            "fleet": { "revision": revision, "dns": fleet },
         })
     }
 
@@ -349,15 +430,24 @@ mod tests {
         long["ttl"] = json!(300);
         let mut proxied = record("example.com", "A", "192.0.2.1");
         proxied["proxied"] = json!(true);
-        let document = document(json!([
-            record("www.example.com", "CNAME", "example.com"),
-            long,
-            proxied,
-            record("example.com", "MX", "mail.example.com"),
-            record("example.com", "TXT", "\"quoted\" text"),
-            record("status.example.org", "A", "192.0.2.9"),
-        ]));
+        let document = shared(
+            json!([
+                record("www.example.com", "CNAME", "example.com"),
+                long,
+                proxied,
+                record("example.com", "MX", "mail.example.com"),
+                record("example.com", "TXT", "\"quoted\" text"),
+                record("status.example.org", "A", "192.0.2.9"),
+            ]),
+            json!(1794942959),
+            json!([
+                record("coeus.example.com", "CNAME", "tunnel.example.net"),
+                record("example.org", "A", "192.0.2.9"),
+            ]),
+        );
         let desired = Desired::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(desired.fleet.revision, Some(Revision(1794942959)));
+        assert_eq!(desired.fleet.dns.len(), 2);
         let canonical = desired.canonical();
         let again = Desired::parse(canonical.as_bytes()).unwrap();
         assert_eq!(again, desired);
@@ -393,19 +483,46 @@ mod tests {
     }
 
     #[test]
+    fn a_name_and_type_has_one_owner_across_the_machine_and_the_fleet() {
+        let found = problems(shared(
+            json!([
+                record("app.example.com", "A", "192.0.2.1"),
+                record("www.example.com", "TXT", "hello"),
+                record("api.example.com", "CNAME", "example.com"),
+            ]),
+            json!(1),
+            json!([
+                record("app.example.com", "A", "192.0.2.2"),
+                record("www.example.com", "CNAME", "example.com"),
+                record("api.example.com", "AAAA", "2001:db8::1"),
+                record("tunnel.example.com", "CNAME", "a.example.org"),
+                record("tunnel.example.com", "CNAME", "b.example.org"),
+            ]),
+        ));
+        assert_eq!(
+            found,
+            [
+                "fleet dns tunnel.example.com CNAME: a name holds one CNAME",
+                "fleet dns app.example.com A: this machine declares it too; one name and type has one owner",
+                "fleet dns api.example.com AAAA: a CNAME shares its name with nothing, and this machine declares CNAME at api.example.com",
+                "fleet dns www.example.com CNAME: a CNAME shares its name with nothing, and this machine declares TXT at www.example.com",
+            ]
+        );
+    }
+
+    #[test]
     fn a_file_of_an_older_schema_is_refused() {
         let found = problems(json!({
-            "schema": 1,
+            "schema": 2,
             "host": "web-1",
             "mode": "report",
             "zones": ["example.com"],
-            "host_owned": { "dns": [] },
-            "fleet_owned": { "dns": [] },
+            "dns": [],
         }));
         assert_eq!(
             found,
             [
-                "schema: this norn reads schema 2, not 1; rebuild the desired file with this norn's module"
+                "schema: this norn reads schema 3, not 2; rebuild the desired file with this norn's module"
             ]
         );
     }

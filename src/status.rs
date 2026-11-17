@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     desired::Mode,
-    run::{Line, What},
+    run::{Line, RACED, What},
 };
 
 const LINES: usize = 20;
@@ -112,6 +112,14 @@ impl Summary {
                 What::Planned(verb) => {
                     counts.held += 1;
                     shown.push(format!("held: {verb} {subject}"));
+                }
+                What::Held(verb, why) => {
+                    counts.held += 1;
+                    shown.push(format!("held: {verb} {subject}: {why}"));
+                }
+                What::Raced(verb) => {
+                    counts.held += 1;
+                    shown.push(format!("raced: {verb} {subject}: {RACED}"));
                 }
                 What::Failed(verb, why) => {
                     counts.failed += 1;

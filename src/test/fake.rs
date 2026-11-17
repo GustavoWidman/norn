@@ -8,9 +8,12 @@ use serde_json::{Value, json};
 
 use crate::cloudflare::{Answer, Deliver, Fetch, Verb};
 
+type Interleaved = Box<dyn FnOnce() + Send>;
+
 pub(crate) struct Cloudflare {
     state: Mutex<State>,
     page_cap: usize,
+    interleaved: Mutex<Option<Interleaved>>,
 }
 
 #[derive(Default)]
@@ -26,7 +29,14 @@ impl Cloudflare {
         Arc::new(Self {
             state: Mutex::default(),
             page_cap,
+            interleaved: Mutex::default(),
         })
+    }
+
+    /// runs `other` right before the next write is handled, as another
+    /// machine whose run lands between this one's read and its write
+    pub fn before_next_write(&self, other: impl FnOnce() + Send + 'static) {
+        *self.interleaved.lock().unwrap() = Some(Box::new(other));
     }
 
     pub fn seed(&self, zone: &str, mut record: Value) {
@@ -183,6 +193,10 @@ impl Deliver for Cloudflare {
         _token: &str,
         _timeout: Duration,
     ) -> Answer {
+        let interleaved = self.interleaved.lock().unwrap().take();
+        if let Some(other) = interleaved {
+            other();
+        }
         let mut state = self.state.lock().unwrap();
         let body: Option<Value> = body.map(|body| serde_json::from_slice(&body).unwrap());
         let shown = body.as_ref().map(Value::to_string).unwrap_or_default();
@@ -217,6 +231,17 @@ impl Deliver for Cloudflare {
                 });
                 if identical {
                     return refused(400, 81058, "An identical record already exists.");
+                }
+                let addressed = |existing: &&Value| {
+                    existing["name"] == record["name"]
+                        && matches!(existing["type"].as_str(), Some("A" | "AAAA" | "CNAME"))
+                };
+                if record["type"] == "CNAME" && records.iter().any(|e| addressed(&e)) {
+                    return refused(
+                        400,
+                        81053,
+                        "An A, AAAA, or CNAME record with that host already exists.",
+                    );
                 }
                 state.stamp(&mut record);
                 state.records.get_mut(&zone).unwrap().push(record.clone());

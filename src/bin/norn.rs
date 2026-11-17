@@ -30,6 +30,24 @@ struct Run {
     /// when a run plans more deletes than this, it sends none of them
     #[arg(long, env = "NORN_MAX_DELETES", default_value_t = 10)]
     max_deletes: usize,
+    /// the fleet's rollout file: the revision the whole fleet runs, and when
+    /// that was last checked. without one, retiring shared records are never
+    /// deleted
+    #[arg(long, env = "NORN_ROLLOUT")]
+    rollout: Option<PathBuf>,
+    /// past this age, the rollout file counts as unknown and shared records
+    /// are held
+    #[arg(long, env = "NORN_ROLLOUT_MAX_AGE", default_value = "30m")]
+    rollout_max_age: humantime::Duration,
+}
+
+impl Run {
+    fn rollout(&self) -> Option<norn::RolloutFile> {
+        self.rollout.as_ref().map(|path| norn::RolloutFile {
+            path: path.clone(),
+            max_age: self.rollout_max_age.into(),
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -104,6 +122,7 @@ fn main() -> ExitCode {
                 &state_dir,
                 timing,
                 run.max_deletes,
+                run.rollout().as_ref(),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
@@ -118,6 +137,7 @@ fn main() -> ExitCode {
                 run.token_file.as_deref(),
                 timing(&run, Duration::ZERO),
                 run.max_deletes,
+                run.rollout().as_ref(),
                 verbose,
             ) {
                 Ok(()) => ExitCode::SUCCESS,

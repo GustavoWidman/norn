@@ -27,6 +27,34 @@ impl fmt::Display for HostName {
     }
 }
 
+/// the commit time, in unix seconds, of the commit a configuration was built
+/// from. a newer commit outranks an older one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct Revision(pub u64);
+
+impl fmt::Display for Revision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// whose records a plan brings in line: one machine's, or the records every
+/// machine of the fleet declares alike
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Owner {
+    Host(HostName),
+    Fleet,
+}
+
+impl fmt::Display for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Owner::Host(host) => host.fmt(f),
+            Owner::Fleet => f.write_str("fleet"),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Fqdn(String);
 

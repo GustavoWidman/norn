@@ -4,8 +4,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::{
     dns::{self, Dns, Record, Reported, Ttl},
-    kind::{Live, Ownership, Step, Want},
-    model::{HostName, Zone},
+    kind::{Live, Mark, Ownership, Stamp, Step, Want},
+    model::{HostName, Owner, Revision, Zone},
 };
 
 pub(crate) const WEB_1: &str = "web-1";
@@ -67,7 +67,15 @@ impl Wire {
     }
 
     pub fn marked(self, owner: &HostName) -> Self {
-        self.comment(&dns::mark(owner))
+        self.comment(&dns::mark(&Mark::Host(owner.clone()), false))
+    }
+
+    pub fn shared(self, revision: u64) -> Self {
+        self.comment(&dns::mark(&Mark::Fleet(Revision(revision)), false))
+    }
+
+    pub fn retiring(self, revision: u64) -> Self {
+        self.comment(&dns::mark(&Mark::Fleet(Revision(revision)), true))
     }
 
     pub fn live(&self) -> Live<Dns> {
@@ -104,7 +112,7 @@ impl Wire {
         })
     }
 
-    pub fn written(record: &Record, owner: &HostName) -> Self {
+    pub fn written(record: &Record, mark: &Mark) -> Self {
         let reach = record.data.reach();
         Wire {
             kind: match record.data.record_type() {
@@ -122,7 +130,7 @@ impl Wire {
             proxied: reach.map(|reach| reach.proxied()),
             ttl: record.data.ttl().to_wire(),
             priority: record.data.priority(),
-            comment: Some(dns::mark(owner)),
+            comment: Some(dns::mark(mark, false)),
         }
     }
 }
@@ -139,8 +147,26 @@ pub(crate) fn mx(owner: &HostName, name: &str, exchange: &str, priority: u16) ->
     declare(owner, "MX", name, exchange, None, Ttl::Auto, Some(priority))
 }
 
+/// a record every machine of the fleet declares alike
+pub(crate) fn shared(kind: &str, name: &str, content: &str) -> Want<Dns> {
+    declared(Owner::Fleet, kind, name, content, None, Ttl::Auto, None)
+}
+
 pub(crate) fn declare(
     owner: &HostName,
+    kind: &str,
+    name: &str,
+    content: &str,
+    proxied: Option<bool>,
+    ttl: Ttl,
+    priority: Option<u16>,
+) -> Want<Dns> {
+    let owner = Owner::Host(owner.clone());
+    declared(owner, kind, name, content, proxied, ttl, priority)
+}
+
+fn declared(
+    owner: Owner,
     kind: &str,
     name: &str,
     content: &str,
@@ -156,35 +182,49 @@ pub(crate) fn declare(
         .expect("fixture names are within the fixture zones");
     Want {
         scope: zone,
-        owner: owner.clone(),
+        owner,
         value,
     }
 }
 
-pub(crate) fn apply(live: Vec<Live<Dns>>, steps: &[Step<Dns>]) -> Vec<Live<Dns>> {
+/// what the steps leave behind; shared objects are written at `revision`
+pub(crate) fn apply(
+    live: Vec<Live<Dns>>,
+    steps: &[Step<Dns>],
+    revision: Revision,
+) -> Vec<Live<Dns>> {
     let mut live = live;
     for step in steps {
-        match step {
-            Step::Adopt {
-                owner,
-                live: object,
-            } => {
-                let found = live.iter_mut().find(|l| l.handle == object.handle).unwrap();
-                found.ownership = Ownership::Marked(owner.clone());
+        let mark = match step.owner() {
+            Owner::Host(host) => Mark::Host(host.clone()),
+            Owner::Fleet => Mark::Fleet(revision),
+        };
+        let ownership = |retiring| match &mark {
+            Mark::Host(host) => Ownership::Host(host.clone()),
+            Mark::Fleet(revision) => Ownership::Fleet(Stamp {
+                revision: *revision,
+                retiring,
+            }),
+        };
+        let found = step
+            .live()
+            .and_then(|object| live.iter().position(|l| l.handle == object.handle));
+        match (step, found) {
+            (Step::Adopt { .. } | Step::Restore { .. }, Some(index)) => {
+                live[index].ownership = ownership(false);
             }
-            Step::Update {
-                owner,
-                live: object,
-                want,
-            } => {
-                let found = live.iter_mut().find(|l| l.handle == object.handle).unwrap();
-                let mut rewritten = Wire::written(want, owner).live();
-                rewritten.handle = found.handle.clone();
-                rewritten.born = found.born.clone();
-                *found = rewritten;
+            (Step::Retire { .. }, Some(index)) => live[index].ownership = ownership(true),
+            (Step::Update { want, .. }, Some(index)) => {
+                let mut rewritten = Wire::written(want, &mark).live();
+                rewritten.handle = live[index].handle.clone();
+                rewritten.born = live[index].born.clone();
+                live[index] = rewritten;
             }
-            Step::Delete { live: object, .. } => live.retain(|l| l.handle != object.handle),
-            Step::Create { owner, want } => live.push(Wire::written(want, owner).live()),
+            (Step::Delete { .. }, Some(index)) => {
+                live.remove(index);
+            }
+            (Step::Create { want, .. }, None) => live.push(Wire::written(want, &mark).live()),
+            (step, found) => panic!("{step:?} found {found:?}"),
         }
     }
     live
