@@ -394,3 +394,39 @@ fn the_plan_does_not_depend_on_input_order() {
         assert_eq!(lines(&plan_zone(WEB_2, &wants, &zone, reversed)), forward);
     }
 }
+
+#[test]
+fn a_name_is_deleted_right_before_it_is_created() {
+    let me = host(WEB_1);
+    let com = zone("example.com");
+    let live: Vec<Live<Dns>> = [
+        wire("A", "app.example.com", "192.0.2.1").marked(&me),
+        wire("A", "old.example.com", "192.0.2.1").marked(&me),
+        wire("A", "cache.example.com", "192.0.2.1").marked(&me),
+        wire("A", "loose.example.com", "192.0.2.5"),
+    ]
+    .iter()
+    .map(|record| record.live())
+    .collect();
+    let wants = vec![
+        want(&me, "CNAME", "app.example.com", "example.com"),
+        want(&me, "A", "cache.example.com", "192.0.2.2"),
+        want(&me, "A", "loose.example.com", "192.0.2.5"),
+    ];
+    let plan = plan_zone(WEB_1, &wants, &com, live);
+    let steps: Vec<String> = plan
+        .steps
+        .iter()
+        .map(|step| format!("{} {}", step.verb(), step.key()))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "adopt A      loose.example.com",
+            "update A      cache.example.com",
+            "delete A      app.example.com",
+            "create CNAME  app.example.com",
+            "delete A      old.example.com",
+        ]
+    );
+}
