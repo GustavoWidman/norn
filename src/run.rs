@@ -150,7 +150,7 @@ pub(crate) fn converge_with(
         };
         let token = match token_file.map(Token::read) {
             Some(Ok(token)) => token,
-            None | Some(Err(TokenError::Missing)) => {
+            None | Some(Err(TokenError::Missing | TokenError::Empty)) => {
                 let message = "no cloudflare token yet; skipping this run".to_owned();
                 log::warn!("{message}");
                 break 'run crate::status::Summary::problem(

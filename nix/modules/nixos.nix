@@ -27,6 +27,9 @@ let
       Type = "oneshot";
       ExecStart = command;
       LoadCredential = "token:${cfg.tokenFile}";
+      # a missing LoadCredential= source fails the unit, and with it the
+      # switch. this blank fallback reaches norn as no token, which skips the run
+      SetCredential = "token:\\n";
 
       DynamicUser = true;
       User = "norn";

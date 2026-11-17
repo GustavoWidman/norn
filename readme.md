@@ -152,8 +152,9 @@ on macos, a single launchd daemon does both jobs.
 
 nothing retries inside a run. a run that hits its deadline gives up, writes
 down what didn't apply in `/var/lib/norn/status.json`, and leaves it to the
-next sweep. a missing token file skips the run, which counts as trouble if it
-keeps happening.
+next sweep. a missing or empty token file skips the run, which counts as
+trouble if it keeps happening. that covers a secret not decrypted on this
+machine yet: the unit still exits 0, so it never holds up a deploy.
 
 ## commands
 
