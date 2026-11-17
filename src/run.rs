@@ -73,7 +73,7 @@ impl Cloudflare {
 /// did not apply.
 ///
 /// the one error is a caller that does not own `state_dir`, which is
-/// refused before the run starts (see [owner_only]).
+/// refused before the run starts.
 pub fn converge(
     desired: &Path,
     token_file: Option<&Path>,
@@ -118,10 +118,6 @@ pub fn converge(
     Ok(())
 }
 
-/// a run creates `lock` and `status.json` as its caller. once another user
-/// owns them, the service's own runs cannot open them, so only the owner of
-/// `state_dir` may run. a `state_dir` that does not exist yet is the first
-/// run's to create.
 pub(crate) fn owner_only(state_dir: &Path, caller: u32) -> eyre::Result<()> {
     let owner = match std::fs::metadata(state_dir) {
         Ok(metadata) => metadata.uid(),
@@ -553,8 +549,6 @@ fn visit<C: Capability>(api: &Api<C>, desired: &Desired, max_deletes: usize, act
     ));
 }
 
-/// plans every scope, and when the plans delete more than `max_deletes`
-/// objects together, plans them again with every delete withheld
 fn plan_kind<K: Kind, C: Capability>(
     api: &Api<C>,
     owner: &HostName,

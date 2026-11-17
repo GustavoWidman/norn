@@ -171,7 +171,6 @@ in
     touch "$out"
   '';
 }
-# boots the nixos module's units in a vm, which needs kvm
 // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
   nixos = pkgs.testers.runNixOSTest (import ./test.nix { inherit self; });
 }

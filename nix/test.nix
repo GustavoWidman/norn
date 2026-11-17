@@ -20,12 +20,10 @@
         peers.machine = config.cloudflare.claims;
       };
 
-      # one more record, so switching to it changes norn.service and restarts it
-      specialisation.more.configuration.cloudflare.dns."www.example.com".a = { };
+      specialisation.restartsNorn.configuration.cloudflare.dns."www.example.com".a = { };
     };
 
-  # the vm has no network, so a run that gets as far as cloudflare fails to
-  # read it, records that, and exits 0
+  # the vm has no network, so a run that reaches cloudflare cannot read it
   testScript =
     { nodes, ... }:
     ''
@@ -53,7 +51,7 @@
       with subtest("without a token, a switch that restarts norn succeeds"):
           before = status()["finished"]
           machine.succeed(
-              "${nodes.machine.system.build.toplevel}/specialisation/more/bin/switch-to-configuration test"
+              "${nodes.machine.system.build.toplevel}/specialisation/restartsNorn/bin/switch-to-configuration test"
           )
           ran_cleanly("norn.service")
           assert status()["finished"] != before, "the switch did not restart norn.service"

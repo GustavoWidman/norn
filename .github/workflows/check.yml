@@ -36,9 +36,7 @@ jobs:
           fi
           python3 .github/scripts/version.py commits --base "$BASE_SHA" --head "$HEAD_SHA"
 
-  # the nixos vm test boots on x86_64-linux, the one runner with kvm. the
-  # module and the binary it boots are the same on aarch64-linux, which builds
-  # every other check, and the test does not exist on darwin
+  # of these runners, only x86_64-linux has kvm, which the nixos vm test needs
   nix:
     name: nix ${{ matrix.system }}
     if: github.event_name == 'pull_request' || inputs.nix
