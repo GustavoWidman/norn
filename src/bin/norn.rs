@@ -34,7 +34,8 @@ struct Run {
 
 #[derive(Subcommand)]
 enum Command {
-    /// act in the desired file's mode; the service runs this, and it always exits 0
+    /// act in the desired file's mode; the service runs this, and every run exits 0.
+    /// a caller that does not own the state directory is refused and exits 1
     Converge {
         #[command(flatten)]
         run: Run,
@@ -97,14 +98,19 @@ fn main() -> ExitCode {
             lock_wait,
         } => {
             let timing = timing(&run, lock_wait.into());
-            norn::converge(
+            match norn::converge(
                 &run.desired,
                 run.token_file.as_deref(),
                 &state_dir,
                 timing,
                 run.max_deletes,
-            );
-            ExitCode::SUCCESS
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    log::error!("{error:#}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Report { run, verbose } => {
             match norn::report(

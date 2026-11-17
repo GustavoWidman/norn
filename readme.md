@@ -198,7 +198,11 @@ nothing was written: report only reads. adopt writes the mark into a record's co
 ```
 
 `norn converge` is what the units run, and `norn check` is what the build
-runs. you shouldn't need either by hand.
+runs. you shouldn't need either by hand. converge refuses to run for anyone
+but the owner of its state directory, so `sudo norn converge` on nixos says
+to `systemctl start norn` instead of leaving behind a lock file the service's
+own user can't open. on macos the daemon and `sudo` are both root, so there
+it just runs.
 
 ## file structure
 

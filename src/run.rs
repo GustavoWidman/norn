@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -70,13 +71,17 @@ impl Cloudflare {
 /// outage, a timeout, even a panic (the hook logs it and exits 0). an
 /// activation never fails because of cloudflare; the status file says what
 /// did not apply.
+///
+/// the one error is a caller that does not own `state_dir`, which is
+/// refused before the run starts (see [owner_only]).
 pub fn converge(
     desired: &Path,
     token_file: Option<&Path>,
     state_dir: &Path,
     timing: Timing,
     max_deletes: usize,
-) {
+) -> eyre::Result<()> {
+    owner_only(state_dir, rustix::process::geteuid().as_raw())?;
     let crash_dir = state_dir.to_owned();
     std::panic::set_hook(Box::new(move |panic| {
         log::error!("norn crashed: {panic}");
@@ -110,6 +115,33 @@ pub fn converge(
         timing,
         max_deletes,
     );
+    Ok(())
+}
+
+/// a run creates `lock` and `status.json` as its caller. once another user
+/// owns them, the service's own runs cannot open them, so only the owner of
+/// `state_dir` may run. a `state_dir` that does not exist yet is the first
+/// run's to create.
+pub(crate) fn owner_only(state_dir: &Path, caller: u32) -> eyre::Result<()> {
+    let owner = match std::fs::metadata(state_dir) {
+        Ok(metadata) => metadata.uid(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| {
+                format!(
+                    "cannot inspect {}; run `systemctl start norn` instead",
+                    state_dir.display()
+                )
+            });
+        }
+    };
+    if owner == caller {
+        return Ok(());
+    }
+    Err(eyre!(
+        "{} belongs to uid {owner}, and a run as uid {caller} would leave files there the service cannot open; run `systemctl start norn` instead",
+        state_dir.display()
+    ))
 }
 
 pub(crate) fn converge_with(
