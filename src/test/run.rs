@@ -245,6 +245,11 @@ fn a_blocked_create_keeps_the_record_it_would_replace() {
         "{:#?}",
         status.lines
     );
+    assert!(
+        status.lines[1].contains("there now: TXT"),
+        "{:#?}",
+        status.lines
+    );
 }
 
 #[test]

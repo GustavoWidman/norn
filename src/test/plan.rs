@@ -40,7 +40,11 @@ fn verbs(plan: &Plan<Dns>) -> Vec<&'static str> {
 
 fn assert_writes_only_its_own(machine: &str, plan: &Plan<Dns>) {
     let me = host(machine);
-    for step in plan.steps.iter().chain(&plan.withheld) {
+    for step in plan
+        .steps
+        .iter()
+        .chain(plan.withheld.iter().map(|withheld| &withheld.step))
+    {
         match step {
             Step::Adopt { live, .. } => {
                 assert_eq!(
@@ -243,7 +247,11 @@ fn the_delete_cap_holds_across_the_scopes_of_a_run() {
             .filter(|step| step.verb() == "delete")
             .count();
         withheld += plan.withheld.len();
-        assert!(plan.withheld.iter().all(|step| step.verb() == "delete"));
+        assert!(
+            plan.withheld
+                .iter()
+                .all(|withheld| withheld.step.verb() == "delete")
+        );
     }
     assert_eq!(
         (deleted, withheld, budget),

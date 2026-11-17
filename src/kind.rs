@@ -13,11 +13,13 @@ pub(crate) trait Kind: Sized + Clone + Debug {
     type Scope: Ord + Clone + Display + Debug;
     type Place: Clone + Debug;
     type Key: Ord + Clone + Display + Debug;
+    type Name: Ord + Clone + Debug;
     type Identity: Ord + Clone + Debug;
     type Value: Eq + Clone + Display + Debug;
     type Handle: Clone + Debug;
 
     fn key(value: &Self::Value) -> Self::Key;
+    fn name(key: &Self::Key) -> Self::Name;
     fn identity(value: &Self::Value) -> Self::Identity;
 
     fn excludes(want: &Self::Key, other: &Self::Key) -> bool;
@@ -195,10 +197,34 @@ impl Why {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct Withheld<K: Kind> {
+    pub step: Step<K>,
+    pub why: Withhold,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Withhold {
+    Cap,
+    Blocked,
+}
+
+impl Withhold {
+    pub fn explain(&self) -> String {
+        match self {
+            Withhold::Cap => "past this run's delete cap".into(),
+            Withhold::Blocked => {
+                "something this machine wants at this name is blocked, so what is there keeps serving"
+                    .into()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Plan<K: Kind> {
     pub steps: Vec<Step<K>>,
     pub blocked: Vec<Blocked<K>>,
-    pub withheld: Vec<Step<K>>,
+    pub withheld: Vec<Withheld<K>>,
     pub kept: Vec<Live<K>>,
     pub untouched: Vec<Live<K>>,
     pub foreign: Vec<Live<K>>,

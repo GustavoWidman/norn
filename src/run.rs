@@ -275,7 +275,7 @@ pub(crate) enum What {
     Planned(&'static str),
     Applied(&'static str),
     Failed(&'static str, String),
-    Withheld,
+    Withheld(String),
     Blocked(String),
     Unread(String),
     Kept,
@@ -338,7 +338,7 @@ impl Line {
             What::Applied(verb) => log::info!("{verb} {subject}"),
             What::Planned(verb) => log::info!("held ({verb}) {subject}"),
             What::Failed(verb, why) => log::error!("failed to {verb} {subject}: {why}"),
-            What::Withheld => log::warn!("withheld (delete cap) {subject}"),
+            What::Withheld(why) => log::warn!("withheld delete {subject}: {why}"),
             What::Blocked(why) => log::warn!("blocked {subject}: {why}"),
             What::Unread(why) => log::error!("{} {}: unread: {why}", self.kind, self.scope),
             What::Kept | What::Untouched { .. } | What::Foreign(_) => {}
@@ -355,11 +355,13 @@ impl Line {
             .iter()
             .map(|step| Line::step(scope, step, steps(step)))
             .collect();
-        lines.extend(
-            plan.withheld
-                .iter()
-                .map(|step| Line::step(scope, step, What::Withheld)),
-        );
+        lines.extend(plan.withheld.iter().map(|withheld| {
+            Line::step(
+                scope,
+                &withheld.step,
+                What::Withheld(withheld.why.explain()),
+            )
+        }));
         lines.extend(plan.blocked.iter().map(|blocked| {
             Line::of::<K>(
                 scope,

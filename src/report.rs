@@ -17,7 +17,7 @@ pub(crate) fn render(
         .iter()
         .filter(|line| match &line.what {
             What::Planned(verb) => *verb != "create",
-            What::Kept | What::Untouched { .. } | What::Foreign(_) | What::Withheld => true,
+            What::Kept | What::Untouched { .. } | What::Foreign(_) | What::Withheld(_) => true,
             _ => false,
         })
         .count();
@@ -71,7 +71,7 @@ pub(crate) fn render(
                 What::Planned(verb) => (*verb, None),
                 What::Applied(verb) => (*verb, Some("applied".to_owned())),
                 What::Failed(verb, why) => (*verb, Some(format!("failed: {why}"))),
-                What::Withheld => ("withheld", Some("past this run's delete cap".to_owned())),
+                What::Withheld(why) => ("withheld", Some(why.clone())),
                 What::Blocked(why) => ("blocked", Some(why.clone())),
                 What::Unread(why) => {
                     let _ = writeln!(text, "  unread: {why}");
@@ -116,7 +116,7 @@ pub(crate) fn render(
         planned("update"),
         planned("delete"),
         planned("create"),
-        count(&|what| *what == What::Withheld),
+        count(&|what| matches!(what, What::Withheld(_))),
         count(&|what| matches!(what, What::Blocked(_))),
         count(&|what| matches!(what, What::Untouched { .. })),
         count(&|what| matches!(what, What::Foreign(_))),
@@ -133,7 +133,7 @@ fn rank(what: &What) -> u8 {
     match what {
         What::Unread(_) => 0,
         What::Planned(_) | What::Applied(_) | What::Failed(..) => 1,
-        What::Withheld => 2,
+        What::Withheld(_) => 2,
         What::Blocked(_) => 3,
         What::Kept => 4,
         What::Untouched { .. } => 5,

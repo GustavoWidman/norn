@@ -117,9 +117,9 @@ impl Summary {
                     counts.failed += 1;
                     shown.push(format!("failed: {verb} {subject}: {why}"));
                 }
-                What::Withheld => {
+                What::Withheld(why) => {
                     counts.withheld += 1;
-                    shown.push(format!("withheld: delete {subject}"));
+                    shown.push(format!("withheld: delete {subject}: {why}"));
                 }
                 What::Blocked(why) => {
                     counts.blocked += 1;
