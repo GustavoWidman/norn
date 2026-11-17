@@ -202,6 +202,7 @@ runs. you shouldn't need either by hand.
 
 ```text
 .
+├── .github/           # checks for every pull request, releases to the cache
 ├── flake.nix          # the package, the modules, the checks and a dev shell
 ├── nix/
 │   ├── package.nix    # the crane build, with the tests and clippy as checks
@@ -227,6 +228,33 @@ runs. you shouldn't need either by hand.
 dns records are the first kind, not the only one there will ever be.
 cloudflare sells plenty of other things to forget about in a dashboard, and
 `kind.rs` is where the next one plugs in.
+
+## releases
+
+every pull request runs `nix flake check` on x86_64-linux, aarch64-linux and
+aarch64-darwin, and its commits have to follow conventional commits. the
+version lives in `Cargo.toml`, and a pull request has to raise it unless it's
+labeled `no-release`.
+
+once a new version lands on `main`, ci builds norn for all three systems,
+pushes the builds to `https://cache.r3dlust.com` and tags the release. a fleet
+that would rather not compile norn on every machine can just use the cache:
+
+```nix
+nix.settings = {
+  substituters = [ "https://cache.r3dlust.com" ];
+  trusted-public-keys = [
+    "cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI="
+  ];
+};
+```
+
+leave norn's own `nixpkgs` alone (no `inputs.nixpkgs.follows`), though. the
+cache holds the build of norn's exact inputs, and a different nixpkgs means a
+different build, which every machine then gets to compile for itself.
+
+the cache's own address is a dns record too. it was there before norn was, so
+the snake only has to eat its tail once.
 
 ## hacking on it
 
