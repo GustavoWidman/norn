@@ -204,14 +204,16 @@ pub(crate) struct Withheld<K: Kind> {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Withhold {
-    Cap,
+    Breaker { planned: usize, max: usize },
     Blocked,
 }
 
 impl Withhold {
     pub fn explain(&self) -> String {
         match self {
-            Withhold::Cap => "past this run's delete cap".into(),
+            Withhold::Breaker { planned, max } => format!(
+                "this run plans {planned} deletes, more than its cap of {max}, so it sends none; to let them through, raise services.norn.maxDeletes (--max-deletes) for one deploy"
+            ),
             Withhold::Blocked => {
                 "something this machine wants at this name is blocked, so what is there keeps serving"
                     .into()

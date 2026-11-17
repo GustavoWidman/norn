@@ -53,8 +53,11 @@ a fleet moves through three modes, in order, set by `services.norn.mode`:
 - **`enforce`** does everything: it creates what's missing, updates what
   drifted, deletes marked records nobody declares anymore, and adopts along the
   way. it never creates a record where an unowned one sits on the same name
-  and type, never puts a `CNAME` beside anything, and deletes at most 10
-  records per run, so a bad commit can't wipe a zone in one go.
+  and type, never puts a `CNAME` beside anything, and never deletes a record
+  while what should replace it at that name is blocked. a run that would
+  delete more than 10 records (`services.norn.maxDeletes`) deletes none of
+  them and reports them withheld, so a bad commit can't wipe a zone. raise
+  the cap for the one deploy that really means it.
 
 bringing an existing zone over goes like this: deploy everything in `report`,
 read the plan, switch to `adopt` so norn claims what's already there, and move

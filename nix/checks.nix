@@ -161,6 +161,7 @@ in
     grep -q '"host": "web-2"' ${(machine "web-2").services.norn.desired}
     grep -q '"content": "v=spf1 -all"' ${(machine "web-2").services.norn.desired}
     grep -q '"content": "192.0.2.10"' ${(machine "web-1").services.norn.desired}
+    ${lib.optionalString (!lib.hasInfix "--max-deletes 10" (toString (machine "web-1").services.norn.arguments)) "false"}
     touch "$out"
   '';
 
