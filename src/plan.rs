@@ -5,8 +5,6 @@ use crate::{
     model::HostName,
 };
 
-pub(crate) const MAX_DELETES: usize = 10;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Fate {
     Open,
@@ -19,7 +17,7 @@ pub(crate) fn plan<K: Kind>(
     owner: &HostName,
     wants: Vec<Want<K>>,
     mut live: Vec<Live<K>>,
-    deletes_left: &mut usize,
+    breaker: Option<&Withhold>,
 ) -> Plan<K> {
     live.sort_by(|a, b| a.born.cmp(&b.born));
     let mut fate = vec![Fate::Open; live.len()];
@@ -191,10 +189,8 @@ pub(crate) fn plan<K: Kind>(
         };
         let why = if blocked_names.contains(&K::name(&live[index].key)) {
             Some(Withhold::Blocked)
-        } else if *deletes_left == 0 {
-            Some(Withhold::Cap)
         } else {
-            None
+            breaker.cloned()
         };
         match why {
             Some(why) => {
@@ -202,7 +198,6 @@ pub(crate) fn plan<K: Kind>(
                 withheld.push(Withheld { step, why });
             }
             None => {
-                *deletes_left -= 1;
                 fate[index] = Fate::Deleted;
                 steps.push(step);
             }

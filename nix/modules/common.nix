@@ -276,6 +276,16 @@ in
       description = "Seconds a run may spend on Cloudflare; past it, what is left is retried by the next run.";
     };
 
+    maxDeletes = mkOption {
+      type = types.ints.unsigned;
+      default = 10;
+      description = ''
+        When a run would delete more records than this, it deletes none of
+        them and reports them withheld. Raise it for the one deploy that means
+        to remove that many.
+      '';
+    };
+
     requestTimeout = mkOption {
       type = types.ints.positive;
       default = 5;
@@ -326,6 +336,8 @@ in
           "${toString cfg.deadline}s"
           "--request-timeout"
           "${toString cfg.requestTimeout}s"
+          "--max-deletes"
+          (toString cfg.maxDeletes)
         ];
       };
 
@@ -341,7 +353,8 @@ in
             wrapProgram $out/bin/norn \
               --set-default NORN_DESIRED /etc/norn/desired.json \
               --set-default NORN_TOKEN_FILE ${lib.escapeShellArg cfg.tokenFile} \
-              --set-default NORN_STATE_DIR /var/lib/norn
+              --set-default NORN_STATE_DIR /var/lib/norn \
+              --set-default NORN_MAX_DELETES ${toString cfg.maxDeletes}
           '';
         })
       ];

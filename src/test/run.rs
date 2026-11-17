@@ -63,6 +63,16 @@ impl Machine {
         mode: Mode,
         wants: Vec<Want<crate::dns::Dns>>,
     ) -> Health {
+        self.converge_deleting(fake, mode, wants, MAX_DELETES)
+    }
+
+    fn converge_deleting(
+        &self,
+        fake: &Arc<fake::Cloudflare>,
+        mode: Mode,
+        wants: Vec<Want<crate::dns::Dns>>,
+        max_deletes: usize,
+    ) -> Health {
         let desired = self.declare(mode, wants);
         converge_with(
             &Cloudflare::Fake(fake.clone()),
@@ -70,6 +80,7 @@ impl Machine {
             Some(&self.token()),
             &self.state(),
             timing(),
+            max_deletes,
         )
     }
 
@@ -80,6 +91,7 @@ impl Machine {
             &desired,
             Some(&self.token()),
             timing(),
+            MAX_DELETES,
             false,
         )
         .unwrap();
@@ -87,6 +99,8 @@ impl Machine {
         text
     }
 }
+
+const MAX_DELETES: usize = 10;
 
 fn timing() -> Timing {
     Timing {
@@ -285,6 +299,12 @@ fn a_run_past_the_delete_cap_deletes_nothing() {
         "{:#?}",
         status.lines
     );
+
+    assert_eq!(
+        one.converge_deleting(&fake, ENFORCE, vec![], 14),
+        Health::Converged
+    );
+    assert_eq!(marked(), 0);
 }
 
 #[test]
@@ -323,6 +343,7 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
             Some(&one.token()),
             &one.state(),
             spent,
+            MAX_DELETES,
         )
     };
     assert_eq!(run(), Health::Failing);
@@ -355,6 +376,7 @@ fn a_missing_token_skips_the_run() {
         Some(&missing),
         &one.state(),
         timing(),
+        MAX_DELETES,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -383,6 +405,7 @@ fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
         Some(&one.token()),
         &one.state(),
         waiting,
+        MAX_DELETES,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -398,6 +421,7 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
         Some(&one.token()),
         &one.state(),
         timing(),
+        MAX_DELETES,
     );
     assert_eq!(health, Health::Failing);
 }

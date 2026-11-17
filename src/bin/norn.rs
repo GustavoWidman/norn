@@ -27,6 +27,9 @@ struct Run {
     /// one request's budget
     #[arg(long, default_value = "5s")]
     request_timeout: humantime::Duration,
+    /// when a run plans more deletes than this, it sends none of them
+    #[arg(long, env = "NORN_MAX_DELETES", default_value_t = 10)]
+    max_deletes: usize,
 }
 
 #[derive(Subcommand)]
@@ -94,7 +97,13 @@ fn main() -> ExitCode {
             lock_wait,
         } => {
             let timing = timing(&run, lock_wait.into());
-            norn::converge(&run.desired, run.token_file.as_deref(), &state_dir, timing);
+            norn::converge(
+                &run.desired,
+                run.token_file.as_deref(),
+                &state_dir,
+                timing,
+                run.max_deletes,
+            );
             ExitCode::SUCCESS
         }
         Command::Report { run, verbose } => {
@@ -102,6 +111,7 @@ fn main() -> ExitCode {
                 &run.desired,
                 run.token_file.as_deref(),
                 timing(&run, Duration::ZERO),
+                run.max_deletes,
                 verbose,
             ) {
                 Ok(()) => ExitCode::SUCCESS,

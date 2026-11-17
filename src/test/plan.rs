@@ -1,8 +1,8 @@
 use crate::{
     dns::{Dns, Ttl},
-    kind::{Live, Ownership, Plan, Step, Want, Why},
+    kind::{Live, Ownership, Plan, Step, Want, Why, Withhold},
     model::Zone,
-    plan::{MAX_DELETES, plan},
+    plan::plan,
 };
 
 use super::fixture::{
@@ -10,13 +10,12 @@ use super::fixture::{
 };
 
 fn plan_zone(machine: &str, wants: &[Want<Dns>], zone: &Zone, live: Vec<Live<Dns>>) -> Plan<Dns> {
-    let mut budget = MAX_DELETES;
     let wants = wants
         .iter()
         .filter(|want| want.scope == *zone)
         .cloned()
         .collect();
-    plan(&host(machine), wants, live, &mut budget)
+    plan(&host(machine), wants, live, None)
 }
 
 fn lines(plan: &Plan<Dns>) -> Vec<String> {
@@ -227,36 +226,19 @@ fn nothing_unmarked_foreign_or_unreadable_is_ever_written() {
 }
 
 #[test]
-fn the_delete_cap_holds_across_the_scopes_of_a_run() {
+fn a_tripped_breaker_withholds_every_delete_and_what_needs_one() {
     let me = host(WEB_1);
-    let mut budget = MAX_DELETES;
-    let mut deleted = 0;
-    let mut withheld = 0;
-    for zone_name in ["example.com", "example.net"] {
-        let live: Vec<Live<Dns>> = (0..8)
-            .map(|n| {
-                wire("A", &format!("h{n}.{zone_name}"), "192.0.2.1")
-                    .marked(&me)
-                    .live()
-            })
-            .collect();
-        let plan = plan(&me, vec![], live, &mut budget);
-        deleted += plan
-            .steps
-            .iter()
-            .filter(|step| step.verb() == "delete")
-            .count();
-        withheld += plan.withheld.len();
-        assert!(
-            plan.withheld
-                .iter()
-                .all(|withheld| withheld.step.verb() == "delete")
-        );
-    }
-    assert_eq!(
-        (deleted, withheld, budget),
-        (MAX_DELETES, 16 - MAX_DELETES, 0)
-    );
+    let live = vec![
+        wire("A", "app.example.com", "192.0.2.1").marked(&me).live(),
+        wire("A", "old.example.com", "192.0.2.1").marked(&me).live(),
+    ];
+    let wants = vec![want(&me, "CNAME", "app.example.com", "example.com")];
+    let breaker = Withhold::Breaker { planned: 2, max: 1 };
+    let plan = plan(&me, wants, live, Some(&breaker));
+    assert!(plan.steps.is_empty(), "{:?}", lines(&plan));
+    assert_eq!(plan.withheld.len(), 2);
+    assert!(plan.withheld.iter().all(|withheld| withheld.why == breaker));
+    assert_eq!(plan.blocked[0].why, Why::Excludes);
 }
 
 #[test]
