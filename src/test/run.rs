@@ -388,8 +388,6 @@ fn a_missing_token_skips_the_run() {
     );
 }
 
-/// the nixos units fall back to a blank credential when the token file is
-/// missing, since a missing `LoadCredential=` source fails the unit
 #[test]
 fn an_empty_token_skips_the_run() {
     let fake = cloudflare();
@@ -448,8 +446,6 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
     assert_eq!(health, Health::Failing);
 }
 
-/// a run creates `lock` and `status.json` as its caller, and once someone
-/// else owns them the service can open neither
 #[test]
 fn only_the_state_directorys_owner_converges() {
     let one = Machine::new(WEB_1);

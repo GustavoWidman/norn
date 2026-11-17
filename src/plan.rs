@@ -13,6 +13,19 @@ enum Fate {
     Deleted,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Turn<N> {
+    Adopt,
+    Update,
+    AtName(N, Change),
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Change {
+    Delete,
+    Create,
+}
+
 pub(crate) fn plan<K: Kind>(
     owner: &HostName,
     wants: Vec<Want<K>>,
@@ -169,8 +182,6 @@ pub(crate) fn plan<K: Kind>(
             .or(excluder.map(|index| (index, Why::Excludes)))
     };
 
-    // a delete at a name where this machine's create is blocked would leave
-    // the name with neither the old record nor the new one
     let mut deleted = fate.clone();
     for &index in &deletes {
         deleted[index] = Fate::Deleted;
@@ -224,15 +235,12 @@ pub(crate) fn plan<K: Kind>(
         }
     }
 
-    // adopts, then updates, then name by name with a name's deletes right
-    // before its creates, so a type change leaves its name empty only between
-    // two requests
     let order = |step: &Step<K>| {
-        let (group, name, rank) = match step {
-            Step::Adopt { .. } => (0, None, 0),
-            Step::Update { .. } => (1, None, 0),
-            Step::Delete { .. } => (2, Some(K::name(&step.key())), 0),
-            Step::Create { .. } => (2, Some(K::name(&step.key())), 1),
+        let turn = match step {
+            Step::Adopt { .. } => Turn::Adopt,
+            Step::Update { .. } => Turn::Update,
+            Step::Delete { .. } => Turn::AtName(K::name(&step.key()), Change::Delete),
+            Step::Create { .. } => Turn::AtName(K::name(&step.key()), Change::Create),
         };
         let identity = match step {
             Step::Adopt { live, .. } | Step::Update { live, .. } | Step::Delete { live, .. } => {
@@ -240,7 +248,7 @@ pub(crate) fn plan<K: Kind>(
             }
             Step::Create { want, .. } => Some(K::identity(want)),
         };
-        (group, name, rank, step.key(), identity)
+        (turn, step.key(), identity)
     };
     steps.sort_by_key(order);
     blocked.sort_by(|a, b| {
