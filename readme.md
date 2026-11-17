@@ -6,7 +6,9 @@ norn keeps a nix fleet's cloudflare dns in line with the fleet's own
 configuration. records are declared right next to the service that needs
 them, and every machine pushes its own records to cloudflare when it
 activates, and again every five minutes after that. take a service off a
-machine and its records leave with it.
+machine and its records leave with it. records that belong to no one
+machine, like a tunnel every server connects to, are shared by the whole
+fleet and written by whichever machines run the newest configuration.
 
 named after the norns, who carve what will be into the roots of yggdrasil.
 this one mostly carves `A` records, but the spirit is there.
@@ -27,14 +29,17 @@ without talking to any other machine.
 ## ownership
 
 every record norn writes carries a mark, and the mark is the whole comment:
-`norn v1 host=<host>`, naming the one machine that writes it.
+`norn v1 host=<host>` for a record one machine owns, or
+`norn v1 fleet t=<revision>` for a record the whole fleet shares (see
+[fleet records](#fleet-records)).
 
-a machine updates and deletes only records carrying its own mark. everything
-else is left alone: records with a note a person wrote,
-records with another machine's mark, and anything starting with `norn ` that
-doesn't parse (a future version's mark, say). the one exception is adopting:
-a record with no comment at all, whose content already matches a declaration
-exactly, can be claimed by writing the mark into its comment.
+a machine updates and deletes only records carrying its own mark, and the
+fleet's shared records under the rules below. everything else is left alone:
+records with a note a person wrote, records with another machine's mark, and
+anything starting with `norn ` that doesn't parse (a future version's mark,
+say). the one exception is adopting: a record with no comment at all, whose
+content already matches a declaration exactly, can be claimed by writing the
+mark into its comment.
 
 norn manages `A`, `AAAA`, `CNAME`, `MX` and `TXT` records. anything else in
 the zone (`NS`, `SRV`, `CAA` and friends) is never touched. the longest mark is
@@ -75,8 +80,10 @@ cloudflare.dns."s3.cache.example.com".a = { };
 cloudflare.dns."grafana.example.com".a.proxied = true;
 ```
 
-every record has exactly one machine that owns it. records no single service
-claims, like a domain's mail setup, go on the machine that serves them:
+a record in `cloudflare.dns` has exactly one machine that owns it. records no
+single service claims, like a domain's mail setup, go on the machine that
+serves them, or in [`cloudflare.fleet.dns`](#fleet-records) when no one
+machine should own them:
 
 ```nix
 # the mail server's machine
@@ -107,6 +114,8 @@ the rest is wired up once, in a module every machine imports:
     peers = lib.mapAttrs (_: machine: machine.config.cloudflare.claims) (
       self.nixosConfigurations // self.darwinConfigurations
     );
+    # the commit time of the configuration, for the fleet's shared records
+    revision = if self ? rev then self.lastModified else null;
   };
 }
 ```
@@ -121,14 +130,125 @@ cloudflare.address.ipv4 = "203.0.113.7";
 other. every build sees what every other machine claims, so a machine's build
 fails when:
 
-- two machines claim the same name and type.
-- a `CNAME` shares its name with anything, on any machine.
+- two machines claim the same name and type, or a machine and the fleet do.
+- a `CNAME` shares its name with anything, on any machine or in the fleet.
+- two machines that run norn declare different fleet records.
+- a fleet `A` or `AAAA` record lists no addresses.
 - a machine declares records but doesn't run norn, so nothing would apply them.
 
 on top of that, each machine's records go through `norn check` while the
 machine builds. a misspelled name, a name outside every zone, an address that
 isn't one or a ttl out of range fails that machine's build long before
 anything reaches cloudflare.
+
+## fleet records
+
+some records belong to no one machine. a cloudflare tunnel's `CNAME` is the
+usual one: every server connects to the tunnel, and none of them should be
+the one that owns its name. those go in `cloudflare.fleet.dns`, which takes
+the same shape as `cloudflare.dns`, except that `a` and `aaaa` list their
+`addresses`, since there is no one machine to point at:
+
+```nix
+# a module every machine imports
+cloudflare.fleet.dns."coeus.example.com".cname = {
+  target = "<tunnel id>.cfargotunnel.com";
+  proxied = true;
+};
+```
+
+every machine declares the same fleet records, and any of them can write
+them. the hard part is that they don't all run the same configuration at the
+same time: a deploy rolls out one machine after another, a machine that was
+off comes back on whatever it ran before, and a rollback puts an older
+configuration back. norn sorts this out with the configuration's revision,
+the commit time of the commit it was built from
+(`services.norn.revision`, set to
+`if self ? rev then self.lastModified else null`). a newer commit outranks an
+older one.
+
+### the stamp
+
+a shared record's mark says which configuration last wrote it:
+`norn v1 fleet t=<revision>`. a machine writes shared records with its own
+revision, and leaves alone a shared record that already matches, whatever
+its stamp. so every change a configuration makes leaves at least one record
+stamped with its revision, and that is what tells older configurations to
+stand down.
+
+### the gate
+
+once per run, after reading every zone, norn decides whether this machine may
+write the fleet's records. it holds them, in this order, when:
+
+- **the configuration has no revision.** a build from an uncommitted tree
+  never writes shared records.
+- **a zone could not be read.** a newer configuration's records may be sitting
+  there unseen.
+- **the rollout file is unknown.** it's configured but missing, unreadable, or
+  older than its max age.
+- **the machine is behind the rollout.** the whole fleet already runs a newer
+  configuration than this one.
+- **a shared record carries a newer stamp.** a newer configuration is in
+  charge, and its machines write the shared records.
+
+otherwise it writes. a held machine still plans the fleet's records and
+reports every step it would take, each marked held with the reason. being
+held is the normal state of a machine that is behind or mid-rollout, so a run
+whose shared records are held counts as `held`, never as failing, and this
+machine's own records go on as usual.
+
+`norn report` and the journal say once per run what the gate decided:
+
+```text
+fleet scope: write at t=1794942959; retiring records stamped up to t=1794900000 are deleted
+fleet scope: hold: the fleet has rolled out t=1794942959, newer than this configuration
+```
+
+two machines on the same revision may create the same record at once.
+cloudflare refuses the second (an identical record, or a `CNAME` beside one),
+and that machine reports the create as `raced`, not failed. the next run reads
+what is there.
+
+### the rollout file
+
+`services.norn.rollout.file` points at a json file your deploy tool writes.
+norn reads two fields and ignores the rest:
+
+```json
+{ "committed": 1794942959, "checked": 1794943200 }
+```
+
+`committed` is the revision of the newest configuration the whole reachable
+fleet runs, and `checked` is when (unix seconds) the deploy tool last
+confirmed it. past `services.norn.rollout.maxAge` (30 minutes) the file
+counts as unknown and the fleet's records are held. a missing file only holds
+them: it never fails the unit. the units read it in place as their own
+unprivileged user, so it has to be readable by every user, and it holds
+nothing secret. the nixos units hide `/home`, `/root` and `/run/user`, unless
+the file lives under one of them: then they see those read-only. norn logs a
+rollout file it can't use, whatever the gate decides.
+
+### retiring
+
+a shared record the configuration no longer declares isn't deleted on the
+spot, because machines still on the older configuration want it back. it's
+deleted in two steps:
+
+1. its mark becomes `norn v1 fleet t=<revision> delete`. it keeps serving,
+   and the newer stamp makes older configurations stand down.
+2. once the rollout file says the whole fleet runs that revision or newer,
+   the record is deleted. until then, the report lists its delete as held,
+   waiting for the rollout. while the gate holds, it says why instead.
+
+declare it again and it gets its plain mark back. fleet deletes count toward
+`services.norn.maxDeletes` along with the machine's own.
+
+without a rollout file, norn never deletes a retiring record, since it can't
+know when every machine has moved on, and the report says so. delete it by
+hand, in the dashboard, once every machine runs the configuration that
+dropped it, and not before: a machine still on an older configuration would
+create it again.
 
 ## the token
 
@@ -147,8 +267,9 @@ on nixos, two units run the same binary:
 - `norn-sweep.timer` runs it again every 5 minutes (`services.norn.interval`)
   to repair drift and retry whatever didn't apply.
 
-both run as a dynamic user that only gets the token as a systemd credential.
-on macos, a single launchd daemon does both jobs.
+both run as a dynamic user that only gets the token as a systemd credential,
+and reads the rollout file, if there is one, where it is. on macos, a single
+launchd daemon does both jobs.
 
 nothing retries inside a run. a run that hits its deadline gives up, writes
 down what didn't apply in `/var/lib/norn/status.json`, and leaves it to the
@@ -177,6 +298,7 @@ a report looks like this:
 
 ```text
 norn report · web-1 · configured mode report · 3 scopes, 6 objects read in 1.8ms
+fleet scope: write at t=1794942959; with no rollout file, no retiring record is deleted
 
 dns record · example.com
   adopt      web-1  A      cache.example.com            192.0.2.10  dns only
@@ -184,6 +306,7 @@ dns record · example.com
   blocked    web-1  A      grafana.example.com          192.0.2.10  proxied
                     an object norn does not own sits in this slot; adopt or remove it first; there now: A      grafana.example.com 192.0.2.99  proxied
   untouched         TXT    _acme-challenge.example.com  "Zq1mP0aJx4sV8tN2cR6yB3uL9wE5kH7dG0fA2oI4"  ttl 120
+  create     fleet  CNAME  tunnel.example.com           abc.cfargotunnel.com  proxied
   untouched         A      grafana.example.com          192.0.2.99  proxied
   untouched         A      status.example.com           192.0.2.1  proxied  # has a comment
 
@@ -193,7 +316,7 @@ dns record · example.net
 dns record · example.org
   untouched         A      example.org                  192.0.2.30  dns only
 
-1 to adopt · 0 to update · 0 to delete · 1 to create · 0 withheld · 1 blocked · 5 untouched · 0 others' · 0 kept
+1 to adopt · 0 to update · 0 to delete · 2 to create · 0 to retire · 0 to restore · 0 held · 0 withheld · 1 blocked · 5 untouched · 0 others' · 0 kept
 nothing was written: report only reads. adopt writes the mark into a record's comment and changes nothing else
 ```
 
@@ -211,7 +334,17 @@ a few things norn deliberately leaves to you:
 - **moving a record to another machine leaves a gap.** the old machine deletes
   it on its next run, and the new one may only create it on the run after
   that, so the name can answer nothing for up to one sweep (5 minutes), plus
-  however long resolvers cache the gap. move records at a quiet moment.
+  however long resolvers cache the gap. the same goes for moving a record
+  between a machine and the fleet. move records at a quiet moment.
+- **rolling back shared records takes a new commit.** a rollback deploys an
+  older commit, and an older revision never overrides a newer stamp, so its
+  machines hold the shared records as they are. to change them back, revert
+  in a new commit and deploy that.
+- **a shared type change waits for the rollout.** turning a shared `A` into a
+  `CNAME` retires the `A`, and the `CNAME` waits beside it, held, until the
+  `A` is deleted once the whole fleet runs the change. the run that deletes
+  the `A` creates the `CNAME` right after. without a rollout file, the `CNAME`
+  waits until you delete the `A` by hand.
 - **dropping a zone from `cloudflare.zones` orphans its records.** norn stops
   reading the zone, so the records it marked there stay exactly as they are,
   unmanaged, until you remove them by hand. add the zone back and norn picks
@@ -244,11 +377,12 @@ a few things norn deliberately leaves to you:
     ├── bin/norn.rs    # the cli
     ├── run.rs         # converge, report, check and status
     ├── plan.rs        # what to adopt, update, delete and create. pure
+    ├── gate.rs        # whether a run may write the fleet's shared records
     ├── kind.rs        # what a kind of cloudflare object has to describe
     ├── dns/           # the first kind: record values, marks, the wire format
     ├── cloudflare/    # the api client, read-only or read-write by type
     ├── desired.rs     # what a machine declares, as its module renders it
-    ├── model.rs       # host names, owners, domain names and zones
+    ├── model.rs       # host names, owners, revisions, domain names and zones
     ├── report.rs      # the printed plan
     ├── status.rs      # status.json
     └── test/          # an in-memory cloudflare, and the tests that use it
