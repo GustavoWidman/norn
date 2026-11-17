@@ -78,6 +78,7 @@ let
     };
   };
   desktop.services.norn.enable = false;
+  tunnel.cloudflare.fleet.dns."tunnel.example.com".cname.target = "abc.cfargotunnel.com";
 
   cases = {
     clean = {
@@ -115,6 +116,79 @@ let
         "norn: app.example.org CNAME shares its name with app.example.org TXT; a CNAME shares its name with nothing."
       ];
     };
+    fleet-clean = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          tunnel
+        ];
+        web-2 = with' [
+          web-2
+          tunnel
+        ];
+        inherit desktop;
+      };
+      expect = [ ];
+    };
+    fleet-claimed-by-a-machine = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          tunnel
+          { cloudflare.fleet.dns."cache.example.com".a.addresses = [ "192.0.2.10" ]; }
+        ];
+      };
+      expect = [
+        "norn: cache.example.com A is claimed by web-1 and by the fleet; one name and type has one owner."
+      ];
+    };
+    fleet-cname-beside-a-machines-record = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          tunnel
+        ];
+        web-2 = with' [
+          web-2
+          tunnel
+          { cloudflare.dns."tunnel.example.com".txt = [ "hello" ]; }
+        ];
+      };
+      expect = [
+        "norn: tunnel.example.com CNAME shares its name with tunnel.example.com TXT; a CNAME shares its name with nothing."
+      ];
+    };
+    fleet-disagrees = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          tunnel
+        ];
+        web-2 = with' [
+          web-2
+          { cloudflare.fleet.dns."tunnel.example.com".cname.target = "def.cfargotunnel.com"; }
+        ];
+        desktop = with' [
+          desktop
+          { cloudflare.fleet.dns."stale.example.com".txt = [ "ignored" ]; }
+        ];
+      };
+      expect = [
+        "norn: web-1 declares other fleet records than web-2; every machine declares the same cloudflare.fleet.dns."
+        "norn: web-2 declares other fleet records than web-1; every machine declares the same cloudflare.fleet.dns."
+      ];
+    };
+    fleet-without-addresses = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          { cloudflare.fleet.dns."vpn.example.com".a = { }; }
+        ];
+      };
+      expect = [
+        "norn: fleet record vpn.example.com A names no addresses; a shared record lists its own."
+      ];
+    };
     records-without-norn = {
       fleet = {
         inherit web-1;
@@ -136,6 +210,19 @@ let
   wrong = lib.filterAttrs (_: case: case.expect != case.actual) report;
 
   machine = name: (fleet { ${name} = cases.clean.fleet.${name}; }).${name}.config;
+  sharing =
+    (fleet {
+      web-1 = with' [
+        web-1
+        tunnel
+        {
+          services.norn = {
+            revision = 1794942959;
+            rollout.file = "/var/lib/fleet/rollout.json";
+          };
+        }
+      ];
+    }).web-1.config;
   broken =
     (fleet {
       web-1 = with' [
@@ -162,6 +249,12 @@ in
     grep -q '"content": "v=spf1 -all"' ${(machine "web-2").services.norn.desired}
     grep -q '"content": "192.0.2.10"' ${(machine "web-1").services.norn.desired}
     ${lib.optionalString (!lib.hasInfix "--max-deletes 10" (toString (machine "web-1").services.norn.arguments)) "false"}
+    grep -q '"schema": 3' ${sharing.services.norn.desired}
+    grep -q '"revision": 1794942959' ${sharing.services.norn.desired}
+    grep -q '"content": "abc.cfargotunnel.com"' ${sharing.services.norn.desired}
+    grep -q '"revision": null' ${(machine "web-1").services.norn.desired}
+    ${lib.optionalString (!lib.hasInfix "--rollout /var/lib/fleet/rollout.json --rollout-max-age 1800s" (toString sharing.services.norn.arguments)) "false"}
+    ${lib.optionalString (lib.hasInfix "--rollout" (toString (machine "web-1").services.norn.arguments)) "false"}
     touch "$out"
   '';
 
