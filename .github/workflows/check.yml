@@ -36,6 +36,9 @@ jobs:
           fi
           python3 .github/scripts/version.py commits --base "$BASE_SHA" --head "$HEAD_SHA"
 
+  # the nixos vm test boots on x86_64-linux, the one runner with kvm. the
+  # module and the binary it boots are the same on aarch64-linux, which builds
+  # every other check, and the test does not exist on darwin
   nix:
     name: nix ${{ matrix.system }}
     if: github.event_name == 'pull_request' || inputs.nix
@@ -47,18 +50,28 @@ jobs:
         include:
           - system: x86_64-linux
             runner: ubuntu-24.04
+            vm: true
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
+            vm: false
           - system: aarch64-darwin
             runner: macos-15
+            vm: false
     steps:
       - uses: actions/checkout@v5
+      - name: Enable KVM
+        if: matrix.vm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - uses: nixbuild/nix-quick-install-action@v34
         with:
           nix_conf: |
             substituters = https://cache.nixos.org/ https://cache.r3dlust.com
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
             max-jobs = auto
+            system-features = nixos-test benchmark big-parallel kvm
       - name: Locate the Rust dependency build
         id: deps
         run: .github/scripts/deps-cache locate >> "$GITHUB_OUTPUT"
@@ -72,7 +85,18 @@ jobs:
           save: false
       - if: steps.deps-cache.outputs.hit-primary-key == 'true'
         run: .github/scripts/deps-cache import "${{ steps.deps.outputs.path }}"
-      - run: nix flake check --print-build-logs
+      - if: matrix.vm
+        run: nix flake check --print-build-logs
+      - name: Build every check but the vm test
+        if: ${{ !matrix.vm }}
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          names=$(nix eval --raw ".#checks.$SYSTEM" \
+            --apply 'checks: toString (builtins.attrNames (removeAttrs checks [ "nixos" ]))')
+          set --
+          for name in $names; do set -- "$@" ".#checks.$SYSTEM.$name"; done
+          nix build --print-build-logs "$@"
       - name: Record the checked tree
         id: tree
         if: github.event_name == 'pull_request' && matrix.system == 'x86_64-linux'

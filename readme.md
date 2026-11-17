@@ -213,6 +213,7 @@ it just runs.
 ├── nix/
 │   ├── package.nix    # the crane build, with the tests and clippy as checks
 │   ├── checks.nix     # the module's assertions, over small fake fleets
+│   ├── test.nix       # the nixos units, booted in a vm
 │   └── modules/
 │       ├── common.nix # cloudflare.* and services.norn, for both platforms
 │       ├── nixos.nix  # norn.service and the sweep timer
@@ -237,8 +238,9 @@ cloudflare sells plenty of other things to forget about in a dashboard, and
 
 ## releases
 
-every pull request runs `nix flake check` on x86_64-linux, aarch64-linux and
-aarch64-darwin, and its commits have to follow conventional commits. the
+every pull request builds every check on x86_64-linux, aarch64-linux and
+aarch64-darwin. the nixos vm test needs kvm, so it runs on x86_64-linux
+alone. its commits have to follow conventional commits. the
 version lives in `Cargo.toml`, and a pull request has to raise it unless it's
 labeled `no-release`.
 
@@ -267,7 +269,8 @@ the snake only has to eat its tail once.
 ```bash
 nix develop        # the toolchain
 cargo test         # the tests, against a fake in-memory cloudflare
-nix flake check    # the tests, clippy, the package and the module checks
+nix flake check    # the tests, clippy, the package and the module checks,
+                   # plus a vm test of the nixos units on linux
 ```
 
 the tests never talk to the real cloudflare. `src/test/fake.rs` answers like
