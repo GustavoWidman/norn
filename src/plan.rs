@@ -224,12 +224,15 @@ pub(crate) fn plan<K: Kind>(
         }
     }
 
+    // adopts, then updates, then name by name with a name's deletes right
+    // before its creates, so a type change leaves its name empty only between
+    // two requests
     let order = |step: &Step<K>| {
-        let rank = match step {
-            Step::Adopt { .. } => 0,
-            Step::Update { .. } => 1,
-            Step::Delete { .. } => 2,
-            Step::Create { .. } => 3,
+        let (group, name, rank) = match step {
+            Step::Adopt { .. } => (0, None, 0),
+            Step::Update { .. } => (1, None, 0),
+            Step::Delete { .. } => (2, Some(K::name(&step.key())), 0),
+            Step::Create { .. } => (2, Some(K::name(&step.key())), 1),
         };
         let identity = match step {
             Step::Adopt { live, .. } | Step::Update { live, .. } | Step::Delete { live, .. } => {
@@ -237,7 +240,7 @@ pub(crate) fn plan<K: Kind>(
             }
             Step::Create { want, .. } => Some(K::identity(want)),
         };
-        (rank, step.key(), identity)
+        (group, name, rank, step.key(), identity)
     };
     steps.sort_by_key(order);
     blocked.sort_by(|a, b| {
