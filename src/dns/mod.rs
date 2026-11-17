@@ -95,7 +95,7 @@ impl Kind for Dns {
                 }),
             ),
             Step::Update { owner, live, want } => {
-                api.send(Verb::Put, &at(live), Some(&wire::body(want, owner)))
+                api.send(Verb::Patch, &at(live), Some(&wire::body(want, owner)))
             }
             Step::Delete { live, .. } => api.send(Verb::Delete, &at(live), None::<&()>),
             Step::Create { owner, want } => api.send(
