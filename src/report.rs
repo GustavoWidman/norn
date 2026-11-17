@@ -1,13 +1,3 @@
-//! the printed plan: one block per kind and scope, one line per object.
-//!
-//! ```text
-//! dns record · example.com
-//!   adopt      web-1  A      heimdall.example.com  192.0.2.10  proxied
-//!   untouched         A      status.example.com    192.0.2.1  proxied  # has a comment
-//!   blocked    web-2  A      tailscale.example.com 192.0.2.20  dns only
-//!                     an unmarked object with this identity differs; align the declaration or the object
-//! ```
-
 use std::{fmt::Write, time::Duration};
 
 use crate::{
@@ -15,7 +5,6 @@ use crate::{
     run::{Line, What},
 };
 
-/// a value longer than this is cut, so a DKIM key does not wrap the table
 const VALUE: usize = 72;
 
 pub(crate) fn render(

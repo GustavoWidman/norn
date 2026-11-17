@@ -1,5 +1,3 @@
-# the shared module over stub fleets: which assertions fail for which
-# declarations, and that the desired file's derivation runs `norn check`.
 {
   pkgs,
   lib,
@@ -7,8 +5,6 @@
   norn,
 }:
 let
-  # a fleet of machines that evaluate the shared module and nothing else,
-  # each reading the others' claims as the fleet's flake passes them
   fleet =
     machines:
     let
@@ -60,7 +56,6 @@ let
       )
     );
 
-  # one machine's declarations from several modules
   with' = modules: { imports = modules; };
 
   web-1 = {
@@ -201,7 +196,6 @@ in
     touch "$out"
   '';
 
-  # the desired file builds through `norn check` and comes out canonical
   module-desired = pkgs.runCommandLocal "norn-module-desired" { } ''
     grep -q '"host": "web-2"' ${(machine "web-2").services.norn.desired}
     grep -q '"content": "v=spf1 -all"' ${(machine "web-2").services.norn.desired}
@@ -209,7 +203,6 @@ in
     touch "$out"
   '';
 
-  # a name outside every managed zone fails the machine's build
   module-desired-refuses = pkgs.runCommandLocal "norn-module-desired-refuses" { } ''
     grep -q 'cache.example.net is outside every managed zone (example.com, example.org)' \
       ${pkgs.testers.testBuildFailure broken.services.norn.desired}/testBuildFailure.log

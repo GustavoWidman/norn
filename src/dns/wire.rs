@@ -1,6 +1,3 @@
-//! cloudflare's json for zones and dns records. private to `dns`: nothing
-//! outside this module sees a wire field.
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +27,6 @@ pub(super) struct LiveRecord {
     pub created_on: DateTime<Utc>,
 }
 
-/// a create or a whole-object update: every field norn manages, the mark included
 #[derive(Serialize, Debug, PartialEq)]
 pub(super) struct Body {
     #[serde(rename = "type")]
@@ -45,7 +41,6 @@ pub(super) struct Body {
     pub comment: String,
 }
 
-/// only the mark: what adopting sends
 #[derive(Serialize)]
 pub(super) struct Mark {
     pub comment: String,

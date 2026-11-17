@@ -1,8 +1,3 @@
-//! an in-memory cloudflare behind the real client: zone lookups, paged
-//! record listings, and record writes with cloudflare's envelope, its 404s
-//! and its identical-record rejection. every request is logged, so a test
-//! asserts what a run sent.
-
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -15,15 +10,12 @@ use crate::cloudflare::{Answer, Deliver, Fetch, Verb};
 
 pub(crate) struct Cloudflare {
     state: Mutex<State>,
-    /// the most records one page holds, whatever the client asks for
     page_cap: usize,
 }
 
 #[derive(Default)]
 struct State {
-    /// zone id -> name
     zones: BTreeMap<String, String>,
-    /// zone id -> records, as cloudflare reports them
     records: BTreeMap<String, Vec<Value>>,
     requests: Vec<String>,
     serial: u64,
@@ -37,8 +29,6 @@ impl Cloudflare {
         })
     }
 
-    /// adds a record as cloudflare would have stored it, creating its zone;
-    /// a record without an id gets one
     pub fn seed(&self, zone: &str, mut record: Value) {
         let mut state = self.state.lock().unwrap();
         let id = state.zone_id(zone);
@@ -48,7 +38,6 @@ impl Cloudflare {
         state.records.entry(id).or_default().push(record);
     }
 
-    /// every request but GETs, as `VERB path body`
     pub fn writes(&self) -> Vec<String> {
         let state = self.state.lock().unwrap();
         state
@@ -98,8 +87,6 @@ impl State {
     }
 }
 
-/// what cloudflare stores of a written record: a proxied record's ttl is
-/// automatic, and only A, AAAA and CNAME carry `proxied`
 fn settle(record: &mut Value) {
     let proxiable = matches!(record["type"].as_str(), Some("A" | "AAAA" | "CNAME"));
     if !proxiable {

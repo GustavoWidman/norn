@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Tags and releases the version in Cargo.toml at the exact commit the release workflow
-# validated and cached. Never moves or overwrites an existing release tag.
 set -euo pipefail
 
 : "${RELEASE_SHA:?set RELEASE_SHA to the validated commit}"
@@ -22,8 +20,8 @@ if git show-ref --verify --quiet "refs/tags/$TAG"; then
   fi
 fi
 
-# A failed API request must not pass for a missing release. Listing every page also
-# finds drafts, and lets a run whose tag push succeeded finish the release.
+# A lookup by tag never returns a draft, so list every release, and let a failed
+# request fail the run rather than read as no release.
 RELEASES=$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100')
 if jq -es --arg tag "$TAG" 'any(.[][]; .tag_name == $tag)' <<<"$RELEASES" >/dev/null; then
   if [[ "$TAG_EXISTS" != true ]]; then

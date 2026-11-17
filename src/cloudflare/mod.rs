@@ -1,8 +1,3 @@
-//! the cloudflare api boundary: auth, the `{success, errors, result,
-//! result_info}` envelope, pagination, timeouts and the run's deadline. kinds
-//! name paths and bring their own wire types; nothing else about http leaves
-//! this module.
-//!
 //! what a client may do is its type. an [`Api<Read>`] holds no sender at
 //! all, not a sender behind a flag, and building any client consumes the
 //! [Token], so once a run has built a reader it cannot build a writer.
@@ -55,9 +50,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// what a client may do; sealed, so the two below are all there are
 pub trait Capability: sealed::Sealed {
-    /// the means to send writes: nothing for [Read], a sender for [Write]
     type Sender;
 }
 
@@ -82,8 +75,6 @@ pub struct Api<C: Capability> {
 }
 
 impl Api<Read> {
-    /// consumes the token: once a read-only client exists, nothing in the
-    /// process holds a token a writer could be built from
     pub fn read_only(token: Token, clock: Clock) -> Self {
         Self::over_fetch(Arc::new(http::Https::new()), token, clock)
     }
@@ -131,7 +122,6 @@ impl Api<Write> {
 }
 
 impl<C: Capability> Api<C> {
-    /// one `result`, e.g. a zone lookup
     pub(crate) fn get<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -140,7 +130,6 @@ impl<C: Capability> Api<C> {
         self.reader.get(path, query)
     }
 
-    /// every page of a listing
     pub(crate) fn list<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -164,7 +153,6 @@ pub struct Token(Zeroizing<String>);
 
 #[derive(Debug)]
 pub enum TokenError {
-    /// no file at the path, as before agenix first decrypts it
     Missing,
     Unreadable(io::Error),
     Empty,
@@ -204,7 +192,6 @@ impl fmt::Display for TokenError {
 pub enum ApiError {
     /// the run's deadline had passed; the request was not sent
     Expired,
-    /// the request outlived its own timeout
     TimedOut(std::time::Duration),
     /// no connection, a tls or a name resolution failure
     Unreachable(String),
@@ -216,7 +203,6 @@ pub enum ApiError {
     NotFound,
     /// a lookup that must find exactly one object found none, e.g. a zone the token cannot see
     Missing(String),
-    /// the response did not parse
     Garbled(String),
 }
 

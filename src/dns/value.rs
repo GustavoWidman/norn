@@ -1,7 +1,3 @@
-//! a record's state as a value. every spelling cloudflare treats as equal
-//! parses to one value, so `==` is exactly "no write needed", and a second
-//! run after a successful one plans nothing.
-
 use std::{
     fmt,
     net::{Ipv4Addr, Ipv6Addr},
@@ -15,8 +11,6 @@ pub(crate) struct Record {
     pub data: Rdata,
 }
 
-/// the record types norn declares. each variant carries exactly the fields
-/// its type has: `reach` exists only where cloudflare proxies, `priority` only on MX.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Rdata {
     A {
@@ -42,17 +36,14 @@ pub(crate) enum Rdata {
     },
 }
 
-/// how a name is answered: through cloudflare's proxy, whose ttl is always
-/// automatic, or directly with a ttl. one type, so "proxied with ttl 300",
-/// which cloudflare would store as automatic and norn would then rewrite on
-/// every run, cannot be declared.
+/// cloudflare answers a proxied record with an automatic ttl whatever ttl it
+/// was sent, so a proxied reach carries none
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Reach {
     Proxied,
     Direct(Ttl),
 }
 
-/// `Auto` is cloudflare's `ttl = 1`
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Ttl {
     Auto,
@@ -60,7 +51,6 @@ pub(crate) enum Ttl {
 }
 
 impl Ttl {
-    /// a declared ttl: 60 to 86400 seconds
     pub fn declared(seconds: u32) -> Result<Self, String> {
         if (60..=86400).contains(&seconds) {
             Ok(Ttl::Seconds(seconds))
@@ -107,7 +97,6 @@ impl Reach {
 pub(crate) struct Text(String);
 
 impl Text {
-    /// a declared text: 1 to 2048 bytes, no control characters
     pub fn parse(text: &str) -> Result<Self, String> {
         if text.is_empty() || text.len() > 2048 {
             return Err(format!(
@@ -121,15 +110,10 @@ impl Text {
         Ok(Self(text.to_owned()))
     }
 
-    /// cloudflare's content field, quoted or not, decoded into one text.
-    /// content that starts with `"` but is not a run of quoted strings is
-    /// taken as it stands.
     pub fn from_live(content: &str) -> Self {
         Self(unquote(content).unwrap_or_else(|| content.to_owned()))
     }
 
-    /// the text as is when it fits one string and cannot be read as quoted;
-    /// otherwise quoted 255-byte strings separated by spaces
     pub fn to_wire(&self) -> String {
         if self.0.len() <= 255 && !self.0.starts_with('"') {
             return self.0.clone();
@@ -156,8 +140,6 @@ impl Text {
     }
 }
 
-/// `"a" "b"` -> `ab`, with `\"` and `\\` escapes; `None` unless the whole
-/// content is quoted strings separated by whitespace
 fn unquote(content: &str) -> Option<String> {
     let mut text = String::new();
     let mut chars = content.trim().chars().peekable();
@@ -180,7 +162,6 @@ fn unquote(content: &str) -> Option<String> {
     Some(text)
 }
 
-/// what tells apart records sharing a name and type
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Content {
     V4(Ipv4Addr),
@@ -196,7 +177,6 @@ pub(crate) enum RecordType {
     Cname,
     Mx,
     Txt,
-    /// a type norn does not declare (NS, SRV, CAA, ...); seen only in live state
     Other(String),
 }
 
@@ -224,7 +204,6 @@ impl RecordType {
     }
 }
 
-/// a record's slot in its zone: its name and type
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Slot {
     pub name: Fqdn,
@@ -239,8 +218,6 @@ impl Record {
         }
     }
 
-    /// a declaration from the desired file. the name must already be
-    /// canonical; the rules across records live in `desired`.
     pub fn declared(
         name: &str,
         kind: &str,
@@ -302,9 +279,6 @@ impl Record {
         Ok(Self { name, data })
     }
 
-    /// a record as cloudflare reports it; `None` for types norn does not
-    /// declare and for content that does not parse. a proxied record is
-    /// `Reach::Proxied` whatever ttl cloudflare reports with it.
     pub fn live(
         name: &Fqdn,
         kind: &RecordType,
@@ -371,7 +345,6 @@ impl Rdata {
         }
     }
 
-    /// what cloudflare's `content` field holds for this value
     pub fn wire_content(&self) -> String {
         match self {
             Rdata::A { address, .. } => address.to_string(),
@@ -409,7 +382,6 @@ impl Rdata {
 }
 
 impl fmt::Display for Slot {
-    /// `A      heimdall.example.com`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:<6} {}", self.kind.as_str(), self.name)
     }
@@ -425,7 +397,6 @@ impl fmt::Display for Ttl {
 }
 
 impl fmt::Display for Record {
-    /// `192.0.2.1  proxied`, `10 mail.example.com`, `"v=spf1 -all"  ttl 120`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ttl = |ttl: Ttl| match ttl {
             Ttl::Auto => String::new(),

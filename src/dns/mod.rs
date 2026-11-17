@@ -1,6 +1,3 @@
-//! dns records: the first kind. everything cloudflare-specific about a
-//! record lives here: its values, its mark, its wire shape.
-
 mod mark;
 mod value;
 mod wire;
@@ -18,11 +15,9 @@ use crate::{
 #[derive(Clone, Debug)]
 pub(crate) struct Dns;
 
-/// a zone as cloudflare addresses it
 #[derive(Clone, Debug)]
 pub(crate) struct ZoneId(String);
 
-/// a record as cloudflare addresses it
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct RecordId(pub String);
 
@@ -112,7 +107,6 @@ impl Kind for Dns {
         match (sent, step) {
             (Ok(_), _) => Ok(()),
             (Err(ApiError::NotFound), Step::Delete { .. }) => Ok(()),
-            // another machine on the same revision created the same fleet record first
             (Err(ApiError::Rejected { errors, .. }), Step::Create { .. })
                 if errors.iter().any(|(code, _)| *code == IDENTICAL_RECORD) =>
             {
@@ -123,10 +117,8 @@ impl Kind for Dns {
     }
 }
 
-/// cloudflare's code for "an identical record already exists"
 const IDENTICAL_RECORD: u32 = 81058;
 
-/// the fields of a record cloudflare reports, as norn reads them
 pub(crate) struct Reported<'a> {
     pub id: &'a str,
     pub created: DateTime<Utc>,
@@ -140,7 +132,6 @@ pub(crate) struct Reported<'a> {
 }
 
 impl Reported<'_> {
-    /// `None` for a name norn cannot spell: it can be nobody's declaration
     pub fn parse(&self) -> Option<Live<Dns>> {
         let name = Fqdn::from_live(self.name)?;
         let kind = RecordType::parse(self.kind);
@@ -164,7 +155,6 @@ impl Reported<'_> {
     }
 }
 
-/// the comment that marks `owner`'s records
 #[cfg(test)]
 pub(crate) fn mark(owner: &crate::model::Owner) -> String {
     mark::write(owner)

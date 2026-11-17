@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Conventional commit and stable SemVer gates. Cargo.toml owns the version; Cargo.lock
-must agree with it."""
 import argparse
 import os
 from pathlib import Path

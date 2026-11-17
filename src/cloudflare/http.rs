@@ -1,7 +1,3 @@
-//! the http layer, private to `cloudflare`. a [Reader] holds something that
-//! can only GET; only a [Sender] holds something that can send another
-//! method, and only an `Api<Write>` holds a [Sender].
-
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -18,7 +14,7 @@ const PER_PAGE: &str = "500";
 /// the run's time budget. every request gets the smaller of `per_request`
 /// and what is left, and once nothing is left a request fails with
 /// [ApiError::Expired] without being sent. callers never handle time: past
-/// the deadline their calls fail fast, and the run records what did not apply.
+/// the deadline their calls fail fast.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
     ends: Instant,
@@ -45,15 +41,12 @@ impl Clock {
     }
 }
 
-/// a status and a body, or why there is none
 pub type Answer = Result<(u16, Vec<u8>), ApiError>;
 
-/// sends GETs: what a [Reader] holds. `path` is relative to `/client/v4`.
 pub trait Fetch {
     fn get(&self, path: &str, query: &[(&str, &str)], token: &str, timeout: Duration) -> Answer;
 }
 
-/// sends every other method: what only a [Sender] holds
 pub trait Deliver {
     fn send(
         &self,
@@ -65,7 +58,6 @@ pub trait Deliver {
     ) -> Answer;
 }
 
-/// cloudflare over https
 pub struct Https(ureq::Agent);
 
 impl Https {
@@ -175,8 +167,6 @@ impl Reader {
         Ok(envelope::<T>(status, &body)?.0)
     }
 
-    /// every page of a listing, following `result_info`; one failed page
-    /// fails the whole listing, so a partial listing never reads as complete
     pub fn list<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -209,8 +199,6 @@ impl Sender {
         }
     }
 
-    /// no retries: a write that timed out may have landed, and the next run
-    /// reads what is there before deciding again
     pub fn send<T: DeserializeOwned>(
         &self,
         verb: Verb,
@@ -246,8 +234,6 @@ struct ResultInfo {
     total_pages: u32,
 }
 
-/// `{success, errors, result, result_info}` -> `result`, or the reason it is missing.
-/// 404 is [ApiError::NotFound], so a delete of what is already gone reads as done.
 fn envelope<T: DeserializeOwned>(
     status: u16,
     body: &[u8],

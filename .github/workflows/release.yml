@@ -1,9 +1,5 @@
 name: release
 
-# A push to main that brings a version with no release yet is checked, built for each
-# system, and pushed to the cache, where norn-<system> pins the newest build, then tagged
-# and released at that commit. A push that releases nothing, such as a pull request
-# labeled no-release, builds nothing.
 on:
   push:
     branches: [main]
@@ -16,8 +12,6 @@ permissions:
   contents: read
 
 jobs:
-  # A failed API request fails the run rather than passing for a missing release, and a
-  # draft counts as a release, as in release-tag.sh.
   version:
     name: Find a version to release
     runs-on: ubuntu-24.04
@@ -32,6 +26,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="v$(python3 .github/scripts/version.py current)"
+          # a lookup by tag never returns a draft; see release-tag.sh
           releases=$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100')
           if jq -es --arg tag "$tag" 'any(.[][]; .tag_name == $tag)' <<< "$releases" > /dev/null; then
             echo "$tag is already released; nothing to build"
@@ -41,9 +36,6 @@ jobs:
             printf 'release=true\n' >> "$GITHUB_OUTPUT"
           fi
 
-  # A pull request merged by rebase lands with the tree its check already ran on, so the
-  # release reuses that `nix flake check` (every system included) instead of repeating
-  # it. Any other push, or a failed lookup, runs the full check.
   checked:
     name: Find a passing check of this tree
     needs: version
@@ -101,7 +93,6 @@ jobs:
           nix_conf: |
             substituters = https://cache.nixos.org/ https://cache.r3dlust.com
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= cache.r3dlust.com-1:Wdkf9mes2ued0P7C7CL3Jax1b4KPuJwQpM3h4G/Z+yI=
-            # nix builds one derivation at a time unless told otherwise
             max-jobs = auto
       - name: Configure the niks3 cache
         id: cache
@@ -109,7 +100,8 @@ jobs:
         with:
           server-url: https://cache.r3dlust.com
           substituter: https://cache.r3dlust.com
-          # Only the finished package is published, in the step below.
+          # otherwise the action pushes every path the job builds; only the package
+          # is published, below
           skip-push: true
       - name: Check upload authorization before building
         env:
@@ -123,8 +115,6 @@ jobs:
       - name: Locate the Rust dependency build
         id: deps
         run: .github/scripts/deps-cache locate >> "$GITHUB_OUTPUT"
-      # Saved only here, on main; pull request checks restore it read-only. Each save
-      # deletes this system's older entries, so the cache holds one per system.
       - name: Restore the Rust dependency build
         id: deps-cache
         uses: nix-community/cache-nix-action@v7.0.2
