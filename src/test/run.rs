@@ -387,6 +387,27 @@ fn a_missing_token_skips_the_run() {
     );
 }
 
+/// the nixos units fall back to a blank credential when the token file is
+/// missing, since a missing `LoadCredential=` source fails the unit
+#[test]
+fn an_empty_token_skips_the_run() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    let desired = one.declare(ENFORCE, web_1());
+    std::fs::write(one.token(), "\n").unwrap();
+    let health = converge_with(
+        &Cloudflare::Fake(fake.clone()),
+        &desired,
+        Some(&one.token()),
+        &one.state(),
+        timing(),
+        MAX_DELETES,
+    );
+    assert_eq!(health, Health::Skipped);
+    assert_eq!(fake.requests(), 0);
+    assert_eq!(status::read(&one.state()).unwrap().health, Health::Skipped);
+}
+
 #[test]
 fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
     let fake = cloudflare();
