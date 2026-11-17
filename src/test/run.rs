@@ -215,6 +215,39 @@ fn an_update_keeps_what_norn_does_not_model() {
 }
 
 #[test]
+fn a_blocked_create_keeps_the_record_it_would_replace() {
+    let fake = cloudflare();
+    let me = host(WEB_1);
+    fake.seed(
+        "example.com",
+        wire("A", "app.example.com", "192.0.2.1").marked(&me).json(),
+    );
+    fake.seed(
+        "example.com",
+        wire("TXT", "app.example.com", "\"verify=1\"").json(),
+    );
+
+    let one = Machine::new(WEB_1);
+    let wants = vec![want(&me, "CNAME", "app.example.com", "example.com")];
+    assert_eq!(one.converge(&fake, ENFORCE, wants), Health::Blocked);
+    assert!(fake.writes().is_empty(), "{:#?}", fake.writes());
+    assert_eq!(
+        fake.records("example.com")
+            .iter()
+            .filter(|record| record["name"] == "app.example.com")
+            .count(),
+        2
+    );
+    let status = status::read(&one.state()).unwrap();
+    assert_eq!(
+        (status.counts.blocked, status.counts.withheld),
+        (1, 1),
+        "{:#?}",
+        status.lines
+    );
+}
+
+#[test]
 fn adopt_and_report_hold_every_other_step() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
