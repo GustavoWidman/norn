@@ -253,6 +253,41 @@ fn a_blocked_create_keeps_the_record_it_would_replace() {
 }
 
 #[test]
+fn a_run_past_the_delete_cap_deletes_nothing() {
+    let fake = cloudflare();
+    let me = host(WEB_1);
+    for zone in ["example.com", "example.org"] {
+        for n in 0..7 {
+            fake.seed(
+                zone,
+                wire("A", &format!("h{n}.{zone}"), "192.0.2.1")
+                    .marked(&me)
+                    .json(),
+            );
+        }
+    }
+    let marked = || {
+        ["example.com", "example.org"]
+            .into_iter()
+            .flat_map(|zone| fake.records(zone))
+            .filter(|record| record["comment"] == "norn v1 host=web-1")
+            .count()
+    };
+
+    let one = Machine::new(WEB_1);
+    assert_eq!(one.converge(&fake, ENFORCE, vec![]), Health::Blocked);
+    assert!(fake.writes().is_empty(), "{:#?}", fake.writes());
+    assert_eq!(marked(), 14);
+    let status = status::read(&one.state()).unwrap();
+    assert_eq!(status.counts.withheld, 14);
+    assert!(
+        status.lines[0].contains("services.norn.maxDeletes"),
+        "{:#?}",
+        status.lines
+    );
+}
+
+#[test]
 fn adopt_and_report_hold_every_other_step() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
