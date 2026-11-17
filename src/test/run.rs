@@ -175,7 +175,7 @@ fn enforce_rewrites_creates_and_deletes_its_own_then_settles() {
         .iter()
         .map(|write| write.split(' ').next().unwrap())
         .collect();
-    assert_eq!(verbs, ["PUT", "DELETE", "POST"], "{writes:#?}");
+    assert_eq!(verbs, ["PATCH", "DELETE", "POST"], "{writes:#?}");
 
     let before = fake.writes().len();
     assert_eq!(one.converge(&fake, ENFORCE, changed), Health::Converged);
