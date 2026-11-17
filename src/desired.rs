@@ -6,6 +6,8 @@ use crate::{
     model::{Fqdn, HostName, Owner, Owners, Zones},
 };
 
+const SCHEMA: u32 = 1;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Report,
@@ -86,10 +88,10 @@ impl Desired {
             });
         };
 
-        if document.schema != 1 {
+        if document.schema != SCHEMA {
             problem(
                 "schema",
-                format!("this norn reads schema 1, not {}", document.schema),
+                format!("this norn reads schema {SCHEMA}, not {}", document.schema),
             );
         }
         let host = HostName::parse(&document.host)
@@ -167,7 +169,7 @@ impl Desired {
             dns: records.iter().map(document::Record::from).collect(),
         };
         let document = document::Document {
-            schema: 1,
+            schema: SCHEMA,
             host: self.host.to_string(),
             mode: self.mode.as_str().to_owned(),
             zones: self.zones.iter().map(ToString::to_string).collect(),

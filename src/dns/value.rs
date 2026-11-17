@@ -51,6 +51,8 @@ pub(crate) enum Ttl {
 }
 
 impl Ttl {
+    const WIRE_AUTO: u32 = 1;
+
     pub fn declared(seconds: u32) -> Result<Self, String> {
         if (60..=86400).contains(&seconds) {
             Ok(Ttl::Seconds(seconds))
@@ -62,7 +64,7 @@ impl Ttl {
     }
 
     pub fn from_wire(ttl: u32) -> Self {
-        if ttl == 1 {
+        if ttl == Self::WIRE_AUTO {
             Ttl::Auto
         } else {
             Ttl::Seconds(ttl)
@@ -71,7 +73,7 @@ impl Ttl {
 
     pub fn to_wire(self) -> u32 {
         match self {
-            Ttl::Auto => 1,
+            Ttl::Auto => Self::WIRE_AUTO,
             Ttl::Seconds(seconds) => seconds,
         }
     }
