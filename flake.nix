@@ -3,10 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     crane.url = "github:ipetkov/crane";
     flake-parts.url = "github:hercules-ci/flake-parts";
     devshell.url = "github:numtide/devshell";
@@ -16,7 +12,6 @@
     inputs@{
       flake-parts,
       crane,
-      fenix,
       devshell,
       ...
     }:
@@ -54,12 +49,9 @@
             ...
           }:
           let
-            toolchain = fenix.packages.${system}.fromToolchainFile {
-              file = ./rust-toolchain.toml;
-              sha256 = "sha256-3MyLNjhfHtXhOj0hzUe3wrwfX6h7B3JURIfNHuSu19w=";
-            };
-
-            craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+            # nixpkgs' stable rust, which cache.nixos.org serves ready to run, for
+            # builds, checks and the devshell alike
+            craneLib = crane.mkLib pkgs;
             norn = pkgs.callPackage ./nix/package.nix { inherit craneLib; };
           in
           {
@@ -79,8 +71,18 @@
             };
 
             devshells.default = {
-              packages = [
-                toolchain
+              packages = with pkgs; [
+                cargo
+                rustc
+                clippy
+                rustfmt
+                rust-analyzer
+              ];
+              env = [
+                {
+                  name = "RUST_SRC_PATH";
+                  value = "${pkgs.rustPlatform.rustLibSrc}";
+                }
               ];
 
               motd = "";
