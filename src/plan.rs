@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    kind::{Blocked, Kind, Live, Ownership, Plan, Step, Want, Why},
+    kind::{Blocked, Kind, Live, Ownership, Plan, Step, Want, Why, Withheld, Withhold},
     model::HostName,
 };
 
@@ -152,24 +152,8 @@ pub(crate) fn plan<K: Kind>(
         deletes.extend(leftover);
     }
 
-    let mut withheld = Vec::new();
-    for index in deletes {
-        let step = Step::Delete {
-            owner: owner.clone(),
-            live: live[index].clone(),
-        };
-        if *deletes_left == 0 {
-            fate[index] = Fate::Written;
-            withheld.push(step);
-        } else {
-            *deletes_left -= 1;
-            fate[index] = Fate::Deleted;
-            steps.push(step);
-        }
-    }
-
-    for want in creates {
-        let key = K::key(&want);
+    let obstacle = |fate: &[Fate], want: &K::Value| {
+        let key = K::key(want);
         let stays = |index: &usize| fate[*index] != Fate::Deleted;
         let occupant = (0..live.len())
             .filter(stays)
@@ -177,24 +161,63 @@ pub(crate) fn plan<K: Kind>(
         let excluder = (0..live.len())
             .filter(stays)
             .find(|&index| live[index].key != key && K::excludes(&key, &live[index].key));
-        match (occupant, excluder) {
-            (Some(index), _) => {
-                blocked.push(Blocked {
-                    owner: owner.clone(),
-                    want,
-                    by: live[index].clone(),
-                    why: Why::Occupied,
-                });
+        occupant
+            .map(|index| (index, Why::Occupied))
+            .or(excluder.map(|index| (index, Why::Excludes)))
+    };
+
+    // a delete at a name where this machine's create is blocked would leave
+    // the name with neither the old record nor the new one
+    let mut deleted = fate.clone();
+    for &index in &deletes {
+        deleted[index] = Fate::Deleted;
+    }
+    let blocked_names: BTreeSet<K::Name> = blocked
+        .iter()
+        .map(|blocked| &blocked.want)
+        .chain(
+            creates
+                .iter()
+                .filter(|want| obstacle(&deleted, want).is_some()),
+        )
+        .map(|want| K::name(&K::key(want)))
+        .collect();
+
+    let mut withheld = Vec::new();
+    for index in deletes {
+        let step = Step::Delete {
+            owner: owner.clone(),
+            live: live[index].clone(),
+        };
+        let why = if blocked_names.contains(&K::name(&live[index].key)) {
+            Some(Withhold::Blocked)
+        } else if *deletes_left == 0 {
+            Some(Withhold::Cap)
+        } else {
+            None
+        };
+        match why {
+            Some(why) => {
+                fate[index] = Fate::Written;
+                withheld.push(Withheld { step, why });
             }
-            (None, Some(index)) => {
-                blocked.push(Blocked {
-                    owner: owner.clone(),
-                    want,
-                    by: live[index].clone(),
-                    why: Why::Excludes,
-                });
+            None => {
+                *deletes_left -= 1;
+                fate[index] = Fate::Deleted;
+                steps.push(step);
             }
-            (None, None) => steps.push(Step::Create {
+        }
+    }
+
+    for want in creates {
+        match obstacle(&deleted, &want).or_else(|| obstacle(&fate, &want)) {
+            Some((index, why)) => blocked.push(Blocked {
+                owner: owner.clone(),
+                want,
+                by: live[index].clone(),
+                why,
+            }),
+            None => steps.push(Step::Create {
                 owner: owner.clone(),
                 want,
             }),

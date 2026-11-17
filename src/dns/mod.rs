@@ -27,12 +27,17 @@ impl Kind for Dns {
     type Scope = Zone;
     type Place = ZoneId;
     type Key = Slot;
+    type Name = Fqdn;
     type Identity = Content;
     type Value = Record;
     type Handle = RecordId;
 
     fn key(record: &Record) -> Slot {
         record.slot()
+    }
+
+    fn name(slot: &Slot) -> Fqdn {
+        slot.name.clone()
     }
 
     fn identity(record: &Record) -> Content {
