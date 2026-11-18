@@ -3,7 +3,7 @@
   name = "norn";
 
   nodes.machine =
-    { config, ... }:
+    { config, pkgs, ... }:
     {
       imports = [ self.nixosModules.default ];
 
@@ -12,6 +12,13 @@
         address.ipv4 = "192.0.2.10";
         dns."machine.example.com".a = { };
         fleet.dns."shared.example.com".a.addresses = [ "192.0.2.20" ];
+        account = "0123456789abcdef0123456789abcdef";
+        fleet.workers.offline = {
+          module = pkgs.writeText "worker.js" "export default { fetch: (request) => fetch(request) };";
+          compatibilityDate = "2026-11-01";
+          routes = [ "shared.example.com/*" ];
+          bypass = [ "shared.example.com/api/*" ];
+        };
       };
 
       services.norn = {
@@ -77,7 +84,9 @@
           machine.succeed("systemctl is-active norn.service")
           ran = status()
           assert (ran["health"], ran["mode"]) == ("failing", "report"), ran
-          assert ran["counts"]["unread"] == 1, ran
+          # the zone's records, the account's scripts and the zone's routes;
+          # had the unit failed to read the worker's module, nothing would be
+          assert ran["counts"]["unread"] == 3, ran
           described = machine.succeed("norn status")
           assert described.startswith("failing") and "unread: dns record example.com" in described, described
 
@@ -88,7 +97,7 @@
               invocation = machine.succeed("systemctl show --property=InvocationID --value norn.service").strip()
               return machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={invocation} --no-pager -o cat")
 
-          held = "fleet scope: hold: a zone could not be read"
+          held = "fleet scope: hold: a scope could not be read"
           protected = machine.succeed("systemctl show --property=ProtectHome --value norn.service").strip()
           assert protected == "read-only", protected
           machine.succeed(
@@ -118,7 +127,7 @@
           machine.succeed("systemctl restart norn.service")
           ran_cleanly("norn.service")
           assert status()["finished"] != before
-          assert status()["counts"]["unread"] == 1, status()
+          assert status()["counts"]["unread"] == 3, status()
 
       with subtest("the sweep timer runs norn-sweep.service"):
           machine.succeed("systemctl is-active norn-sweep.timer")

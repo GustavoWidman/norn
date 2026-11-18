@@ -148,14 +148,28 @@ let
 
   keys = sets: lib.unique (map (row: "${row.name} ${row.type}") (rows sets));
 
+  workers = lib.mapAttrsToList (name: worker: {
+    inherit name;
+    module = "${worker.module}";
+    compatibility_date = worker.compatibilityDate;
+    inherit (worker) routes bypass;
+  }) cf.fleet.workers;
+
+  # what every machine running norn has to agree on about workers
+  sharedWorkers = {
+    inherit (cf) account;
+    inherit workers;
+  };
+
   desired = pkgs.runCommandLocal "norn-desired.json" {
     raw = builtins.toJSON {
-      schema = 3;
+      schema = 4;
       inherit (cfg) host mode;
-      inherit (cf) zones;
+      inherit (cf) zones account;
       dns = rows cf.dns;
       fleet = {
         inherit (cfg) revision;
+        inherit workers;
         dns = rows cf.fleet.dns;
       };
     };
@@ -186,6 +200,9 @@ let
       disagreeing = lib.attrNames (
         lib.filterAttrs (_: claims: (claims.fleet or [ ]) != rows cf.fleet.dns) peers
       );
+      workersDisagree = lib.attrNames (
+        lib.filterAttrs (_: claims: (claims.workers or null) != sharedWorkers) peers
+      );
     in
     [
       {
@@ -212,6 +229,10 @@ let
     ++ lib.optional (disagreeing != [ ]) {
       assertion = false;
       message = "norn: ${lib.concatStringsSep ", " disagreeing} declare${lib.optionalString (lib.length disagreeing == 1) "s"} other fleet records than ${cfg.host}; every machine declares the same cloudflare.fleet.dns.";
+    }
+    ++ lib.optional (workersDisagree != [ ]) {
+      assertion = false;
+      message = "norn: ${lib.concatStringsSep ", " workersDisagree} declare${lib.optionalString (lib.length workersDisagree == 1) "s"} other fleet workers than ${cfg.host}; every machine declares the same cloudflare.fleet.workers and cloudflare.account.";
     };
 in
 {
@@ -257,6 +278,58 @@ in
         `addresses`. Every machine declares the same set, usually from one
         shared module, and any machine running the newest configuration
         writes them.
+      '';
+    };
+
+    account = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "0123456789abcdef0123456789abcdef";
+      description = ''
+        The account the fleet's workers live in. With it set, norn reads the
+        account's scripts and every zone's worker routes on every run, so
+        keep it set as long as any worker norn wrote may still be there.
+      '';
+    };
+
+    fleet.workers = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            module = mkOption {
+              type = types.path;
+              example = lib.literalExpression ''"''${offline-page}/worker.js"'';
+              description = "The worker's main module, one ES module file.";
+            };
+            compatibilityDate = mkOption {
+              type = types.str;
+              example = "2026-11-01";
+              description = "The Workers runtime's compatibility date, `YYYY-MM-DD`.";
+            };
+            routes = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              example = [ "coeus.example.com/*" ];
+              description = "Route patterns that run this worker. Each one's host lies in `cloudflare.zones`.";
+            };
+            bypass = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              example = [ "coeus.example.com/api/*" ];
+              description = ''
+                Route patterns that run no worker at all, so requests there skip
+                this one. The script's tags list them, as they list `routes`, and
+                together the lists fit in the 10 tags Cloudflare keeps on a script.
+              '';
+            };
+          };
+        }
+      );
+      default = { };
+      description = ''
+        Workers the whole fleet shares, by script name. Every machine
+        declares the same set, and any machine running the newest
+        configuration uploads them. They need `cloudflare.account`.
       '';
     };
 
@@ -405,6 +478,7 @@ in
         enabled = cfg.enable;
         keys = keys cf.dns;
         fleet = rows cf.fleet.dns;
+        workers = sharedWorkers;
       };
     }
 
