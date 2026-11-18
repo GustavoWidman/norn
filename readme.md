@@ -8,7 +8,9 @@ them, and every machine pushes its own records to cloudflare when it
 activates, and again every five minutes after that. take a service off a
 machine and its records leave with it. records that belong to no one
 machine, like a tunnel every server connects to, are shared by the whole
-fleet and written by whichever machines run the newest configuration.
+fleet and written by whichever machines run the newest configuration. the
+fleet's cloudflare workers, and the routes that run them, are shared the
+same way.
 
 named after the norns, who carve what will be into the roots of yggdrasil.
 this one mostly carves `A` records, but the spirit is there.
@@ -44,6 +46,8 @@ mark into its comment.
 norn manages `A`, `AAAA`, `CNAME`, `MX` and `TXT` records. anything else in
 the zone (`NS`, `SRV`, `CAA` and friends) is never touched. the longest mark is
 76 bytes, comfortably inside the 100-byte comments of cloudflare's free plan.
+workers have no comment, so their mark lives in the script's tags, as
+[workers](#workers) explains.
 
 ## modes
 
@@ -54,7 +58,7 @@ a fleet moves through three modes, in order, set by `services.norn.mode`:
   anything but a read, and the compiler checks that.
 - **`adopt`** claims the records you already have. a record with no comment
   whose content equals a declaration gets the machine's mark, and nothing else
-  about it changes.
+  about it changes. workers are never adopted.
 - **`enforce`** does everything: it creates what's missing, updates what
   drifted, deletes marked records nobody declares anymore, and adopts along the
   way. it never creates a record where an unowned one sits on the same name
@@ -178,19 +182,20 @@ stand down.
 
 ### the gate
 
-once per run, after reading every zone, norn decides whether this machine may
-write the fleet's records. it holds them, in this order, when:
+once per run, after reading every zone, and the account when there are
+workers, norn decides whether this machine may write the fleet's shared
+objects, records and workers alike. it holds them, in this order, when:
 
 - **the configuration has no revision.** a build from an uncommitted tree
-  never writes shared records.
-- **a zone could not be read.** a newer configuration's records may be sitting
-  there unseen.
+  never writes shared objects.
+- **a zone or the account could not be read.** a newer configuration's
+  objects may be sitting there unseen.
 - **the rollout file is unknown.** it's configured but missing, unreadable, or
   older than its max age.
 - **the machine is behind the rollout.** the whole fleet already runs a newer
   configuration than this one.
-- **a shared record carries a newer stamp.** a newer configuration is in
-  charge, and its machines write the shared records.
+- **a shared object carries a newer stamp.** a newer configuration is in
+  charge, and its machines write the shared objects.
 
 otherwise it writes. a held machine still plans the fleet's records and
 reports every step it would take, each marked held with the reason. being
@@ -201,7 +206,7 @@ machine's own records go on as usual.
 `norn report` and the journal say once per run what the gate decided:
 
 ```text
-fleet scope: write at t=1794942959; retiring records stamped up to t=1794900000 are deleted
+fleet scope: write at t=1794942959; retiring objects stamped up to t=1794900000 are deleted
 fleet scope: hold: the fleet has rolled out t=1794942959, newer than this configuration
 ```
 
@@ -250,11 +255,159 @@ hand, in the dashboard, once every machine runs the configuration that
 dropped it, and not before: a machine still on an older configuration would
 create it again.
 
+## workers
+
+a cloudflare worker is a fleet object too. the first one norn ran puts an
+offline page in front of a site served through a cloudflare tunnel. when
+every connector is down, cloudflare answers with its own error 1033, and the
+free plan can't swap that page for yours. a worker on the site's route can.
+it fetches the origin, and when the answer is a 530 or the fetch throws, it
+returns the site's own offline page.
+
+workers live in an account, so the fleet names the account once, next to its
+zones:
+
+```nix
+# a module every machine imports. offline-page is built by the site's own flake
+cloudflare.account = "0123456789abcdef0123456789abcdef";
+cloudflare.fleet.workers.coeus-offline = {
+  module = "${offline-page}/worker.js";
+  compatibilityDate = "2026-11-01";
+  routes = [ "coeus.example.com/*" ];
+  # the api and the live stream skip the worker entirely
+  bypass = [
+    "coeus.example.com/api/*"
+    "coeus.example.com/live/*"
+  ];
+};
+```
+
+`module` is one es module file, uploaded as the worker's main module. norn
+reads it when it reads the desired file, so what it uploads is the file it
+compared. a pattern is a host, with an optional leading `*`, and a path, with
+an optional trailing `*`. its host has to sit in one of `cloudflare.zones`,
+or `norn check` fails the build. a bypass is a route that runs no worker at
+all. cloudflare picks the most specific pattern that matches, so
+`coeus.example.com/api/*` wins over `coeus.example.com/*` and those requests
+never touch the worker. every machine running norn declares the same workers
+and the same account, or the build fails.
+
+with `cloudflare.account` set, every run reads the account's scripts and the
+worker routes of every managed zone, whether any worker is declared or not.
+keep it set while anything norn wrote could still be there, or nothing
+retires it.
+
+### the script's mark
+
+a script has no comment, but it has tags, which the script list returns and
+which change without uploading a new version of the code. cloudflare keeps
+at most 10 tags on a script and refuses the eleventh. norn's mark takes three
+of them, plus the lists of the worker's routes and bypasses:
+
+```text
+norn v1 fleet t=1794942959                 the stamp, with " delete" appended while retiring
+norn v1 module <digest>                    the module it uploaded
+norn v1 date 2026-11-01                    the compatibility date it set
+norn v1 routes coeus.example.com/*         the routes that run it
+norn v1 bypass coeus.example.com/api/* coeus.example.com/live/*
+```
+
+a list longer than 205 bytes, the longest tag cloudflare is known to take,
+carries on in another tag with the same prefix. `norn check` refuses a worker
+whose mark would take more than 10 tags, which leaves room for about 50
+patterns of 20-odd bytes. tags norn didn't write stay on the script, and they
+count toward the 10 too: past that, cloudflare refuses the write (error
+100103) and the run reports it failed.
+
+a digest is the first half of a sha-256. comparing them tells norn whether
+the script equals its declaration without downloading it. a new module or
+compatibility date uploads the module again, as a multipart `PUT` whose
+metadata carries the tags. a change to the lists alone rewrites the tags and
+nothing else. either way the script ends up stamped with the writing
+configuration's revision, so a new module, date, route or bypass tells older
+configurations to stand down.
+
+a script norn didn't write is never claimed, in any mode. norn can't tell
+what it runs without downloading it, so an unmarked script with the declared
+name blocks that worker until you rename or delete it, and no route is
+pointed at it meanwhile.
+
+### routes
+
+a route is a pattern and the script it runs, nothing else, so it can't carry
+a mark. its owner is whatever lists it:
+
+- **a route that runs a fleet script** is the fleet's when that script's
+  `routes` tags list its pattern.
+- **a route that runs no worker** is the fleet's when a fleet script's
+  `bypass` tags list its pattern.
+- **any other route** is someone else's, and norn never rewrites or deletes
+  it. that includes a route you point at a fleet script by hand: the script
+  doesn't list it. a declared pattern where someone else's route stands is
+  blocked, and the script doesn't list it either, so the route stays yours
+  until you delete it.
+
+a script lists its declared patterns, and keeps listing a dropped one while
+its route is still there. one the configuration still declares is kept or
+rewritten. one it doesn't is deleted once the rollout file says the whole
+fleet runs this configuration, and the report lists the delete as held until
+then. without a rollout file it is never deleted. the run after the delete,
+the script stops listing it.
+
+within a run, a script goes up before the routes that run it, and a route is
+only pointed at a script that is already the fleet's or that the same run
+writes first. when writing a script's tags fails, the routes and bypasses
+they would list wait for the next run, since a route no script lists is no
+longer the fleet's. a dropped worker leaves in the opposite order. its script
+retires, and once the whole fleet runs the change, its routes and bypasses
+are deleted. the script goes in the run after its bypasses, since nothing
+lists a bypass once its script is gone. deleting a script makes cloudflare
+delete every route that runs it, so the script doesn't wait for those. its
+deletes count toward `services.norn.maxDeletes` with everything else, and a
+delete held for the next run doesn't count.
+
+two machines on the same revision may upload at once. an upload replaces the
+script with the same code and the same mark, so both land. cloudflare refuses
+the second create of a route with one pattern (error 10020). the refused
+machine reads the zone's routes again, and reports the create `raced` when
+the route there runs the declared script, or no worker for a bypass. anyone
+else's route there leaves the create failed.
+
+a machine on a newer configuration, with new code, a new bypass and one route
+fewer, reports:
+
+```text
+norn report · web-1 · configured mode report · 5 scopes, 6 objects read in 430.5µs
+fleet scope: write at t=1795000000; retiring objects stamped up to t=1794942959 are deleted
+
+dns record · example.com
+  untouched                      A      example.com       192.0.2.1  proxied
+
+dns record · example.net
+  untouched                      A      example.net       192.0.2.20  proxied
+
+dns record · example.org
+  untouched                      A      example.org       192.0.2.30  dns only
+
+worker script · 0123456789abcdef0123456789abcdef
+  update     fleet               coeus-offline            module 3bfc269594ef  2026-11-01  routes coeus.example.com/* www.coeus.example.com/* -> module fb04dcb6…
+
+worker route · example.com
+  create     fleet               coeus.example.com/api/*  runs no worker
+  delete     fleet               www.coeus.example.com/*  runs coeus-offline
+                                 held: it is deleted once the whole fleet runs t=1795000000, the configuration that dropped it; the fleet runs t=1794942959
+
+0 to adopt · 1 to update · 0 to delete · 1 to create · 0 to retire · 0 to restore · 1 held · 0 withheld · 0 blocked · 3 untouched · 0 others' · 1 kept
+nothing was written: report only reads. adopt writes the mark into a record's comment and changes nothing else
+```
+
 ## the token
 
 norn needs a cloudflare api token with zone read and dns edit on the zones it
-manages. keep it in a secret (agenix, sops-nix, whatever you like) and point
-`services.norn.tokenFile` at it. only the path ends up in the nix store.
+manages. with `cloudflare.account` set, it also needs workers scripts write
+on that account and workers routes write on every zone it manages, since it
+reads the routes of all of them. keep it in a secret (agenix, sops-nix,
+whatever you like) and point `services.norn.tokenFile` at it. only the path ends up in the nix store.
 
 ## running it
 
@@ -298,7 +451,7 @@ a report looks like this:
 
 ```text
 norn report · web-1 · configured mode report · 3 scopes, 6 objects read in 1.8ms
-fleet scope: write at t=1794942959; with no rollout file, no retiring record is deleted
+fleet scope: write at t=1794942959; with no rollout file, no retiring object is deleted
 
 dns record · example.com
   adopt      web-1  A      cache.example.com            192.0.2.10  dns only
@@ -355,6 +508,17 @@ a few things norn deliberately leaves to you:
 - **a type change can still blink.** turning an `A` into a `CNAME` is a delete
   and a create, sent back to back. if cloudflare refuses the create, or the
   run dies between the two, the name stays empty until the next sweep.
+- **deleting a worker takes your routes to it along.** cloudflare deletes
+  every route that runs a script when the script goes, the ones you pointed
+  at a fleet worker by hand included. norn never deletes those itself, but
+  once the fleet drops the worker, they go with it.
+- **a worker edited in the dashboard goes unnoticed.** norn compares the mark,
+  not the code, so a version deployed by hand that keeps the tags stays until
+  the declaration changes. one that drops them turns the script into one norn
+  doesn't own, which blocks the worker.
+- **a worker is its module and nothing more.** norn uploads no bindings,
+  secrets or other settings, so ones set by hand don't survive its next
+  upload.
 - **a failing norn is quiet.** runs always exit 0, so nothing shows up in
   `systemctl --failed`. `sudo norn status` is where to look: it exits 1 once
   runs have been troubled, or silent, for 30 minutes.
@@ -380,6 +544,7 @@ a few things norn deliberately leaves to you:
     ├── gate.rs        # whether a run may write the fleet's shared records
     ├── kind.rs        # what a kind of cloudflare object has to describe
     ├── dns/           # the first kind: record values, marks, the wire format
+    ├── workers/       # worker scripts and routes: values, the tag mark, uploads
     ├── cloudflare/    # the api client, read-only or read-write by type
     ├── desired.rs     # what a machine declares, as its module renders it
     ├── model.rs       # host names, owners, revisions, domain names and zones
@@ -388,9 +553,9 @@ a few things norn deliberately leaves to you:
     └── test/          # an in-memory cloudflare, and the tests that use it
 ```
 
-dns records are the first kind, not the only one there will ever be.
-cloudflare sells plenty of other things to forget about in a dashboard, and
-`kind.rs` is where the next one plugs in.
+dns records and workers are two kinds of object. cloudflare sells plenty of
+other things to forget about in a dashboard, and `kind.rs` is where the next
+one plugs in.
 
 ## releases
 
