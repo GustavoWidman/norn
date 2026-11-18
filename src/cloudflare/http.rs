@@ -43,6 +43,13 @@ impl Clock {
 
 pub type Answer = Result<(u16, Vec<u8>), ApiError>;
 
+/// a request body and its media type
+#[derive(Clone, Debug)]
+pub struct Payload {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
 pub trait Fetch {
     fn get(&self, path: &str, query: &[(&str, &str)], token: &str, timeout: Duration) -> Answer;
 }
@@ -52,7 +59,7 @@ pub trait Deliver {
         &self,
         verb: Verb,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Payload>,
         token: &str,
         timeout: Duration,
     ) -> Answer;
@@ -104,20 +111,27 @@ impl Deliver for Https {
         &self,
         verb: Verb,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Payload>,
         token: &str,
         timeout: Duration,
     ) -> Answer {
         let url = format!("{BASE}{path}");
         let auth = format!("Bearer {token}");
         let with_body = |request: ureq::RequestBuilder<ureq::typestate::WithBody>| {
+            let Payload {
+                content_type,
+                bytes,
+            } = body.clone().unwrap_or_else(|| Payload {
+                content_type: "application/json".into(),
+                bytes: Vec::new(),
+            });
             let request = request
                 .header("Authorization", &auth)
-                .header("Content-Type", "application/json")
+                .header("Content-Type", content_type)
                 .config()
                 .timeout_global(Some(timeout))
                 .build();
-            request.send(body.clone().unwrap_or_default())
+            request.send(bytes)
         };
         let result = match verb {
             Verb::Post => with_body(self.0.post(&url)),
@@ -203,7 +217,7 @@ impl Sender {
         &self,
         verb: Verb,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Payload>,
     ) -> Result<T, ApiError> {
         let timeout = self.clock.budget()?;
         let (status, body) = self.deliver.send(verb, path, body, &self.token, timeout)?;
@@ -241,6 +255,11 @@ fn envelope<T: DeserializeOwned>(
     if status == 404 {
         return Err(ApiError::NotFound);
     }
+    if body.is_empty() && (200..300).contains(&status) {
+        let nothing = serde_json::from_value(serde_json::Value::Null)
+            .map_err(|error| ApiError::Garbled(error.to_string()))?;
+        return Ok((nothing, None));
+    }
     let envelope: Envelope<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|error| ApiError::Garbled(format!("status {status}: {error}")))?;
     if !envelope.success || !(200..300).contains(&status) {
@@ -259,6 +278,16 @@ fn envelope<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_success_is_nothing() {
+        let (nothing, _) = envelope::<serde_json::Value>(200, b"").unwrap();
+        assert_eq!(nothing, serde_json::Value::Null);
+        assert!(matches!(
+            envelope::<serde_json::Value>(502, b""),
+            Err(ApiError::Garbled(_))
+        ));
+    }
 
     #[test]
     fn a_rejection_carries_cloudflares_codes() {

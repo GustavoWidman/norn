@@ -3,3 +3,4 @@ mod fixture;
 mod fleet;
 mod plan;
 mod run;
+mod workers;

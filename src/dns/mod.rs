@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     cloudflare::{Api, ApiError, Capability, Verb, Write},
-    kind::{Born, Kind, Live, Mark, Sent, Step},
+    kind::{Born, Kind, Live, Mark, Reading, Sent, Step},
     model::{Fqdn, Owner, Zone},
 };
 
@@ -20,14 +20,28 @@ const RACED: [u32; 2] = [81058, 81053];
 pub(crate) struct Dns;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ZoneId(String);
+pub(crate) struct ZoneId(pub String);
+
+impl ZoneId {
+    pub fn find<C: Capability>(api: &Api<C>, zone: &Zone) -> Result<Self, ApiError> {
+        let zones: Vec<wire::Zone> = api.get("/zones", &[("name", zone.name().as_str())])?;
+        let id = zones
+            .into_iter()
+            .find(|found| found.name == zone.name().as_str())
+            .ok_or_else(|| ApiError::Missing(format!("zone {zone}")))?
+            .id;
+        Ok(Self(id))
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct RecordId(pub String);
 
 impl Kind for Dns {
     const NAME: &'static str = "dns record";
+    const ADOPTS: bool = true;
 
+    type Context = ();
     type Scope = Zone;
     type Place = ZoneId;
     type Key = Slot;
@@ -53,16 +67,8 @@ impl Kind for Dns {
             && (want.kind == RecordType::Cname || other.kind == RecordType::Cname)
     }
 
-    fn read<C: Capability>(
-        api: &Api<C>,
-        zone: &Zone,
-    ) -> Result<(ZoneId, Vec<Live<Dns>>), ApiError> {
-        let zones: Vec<wire::Zone> = api.get("/zones", &[("name", zone.name().as_str())])?;
-        let id = zones
-            .into_iter()
-            .find(|found| found.name == zone.name().as_str())
-            .ok_or_else(|| ApiError::Missing(format!("zone {zone}")))?
-            .id;
+    fn read<C: Capability>(api: &Api<C>, zone: &Zone, _: &()) -> Reading<Dns> {
+        let ZoneId(id) = ZoneId::find(api, zone)?;
         let records: Vec<wire::LiveRecord> = api.list(&format!("/zones/{id}/dns_records"), &[])?;
         let live = records
             .iter()

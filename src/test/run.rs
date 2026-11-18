@@ -9,12 +9,14 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::{
-    desired::{Desired, Fleet, Mode},
+    desired::{Desired, Fleet, Mode, Worker},
+    dns::Dns,
     gate::RolloutFile,
     kind::{Ladder, Want},
     model::{HostName, Owner, Revision, Zones},
     run::{Cloudflare, Lock, Timing, converge_with, owner_only, report_with},
     status::{self, Health},
+    workers::{Account, CompatibilityDate, Pattern, ScriptName},
 };
 
 use super::{
@@ -27,6 +29,24 @@ pub(super) struct Machine {
     host: &'static str,
     pub revision: Option<u64>,
     pub rollout: Option<RolloutFile>,
+    pub account: Option<&'static str>,
+}
+
+/// what a machine declares: its records, the fleet's, and the fleet's
+/// workers
+#[derive(Default)]
+pub(super) struct Declared {
+    pub dns: Vec<Want<Dns>>,
+    pub workers: Vec<Worker>,
+}
+
+impl From<Vec<Want<Dns>>> for Declared {
+    fn from(dns: Vec<Want<Dns>>) -> Self {
+        Self {
+            dns,
+            workers: Vec::new(),
+        }
+    }
 }
 
 impl Machine {
@@ -38,22 +58,48 @@ impl Machine {
             host,
             revision: None,
             rollout: None,
+            account: None,
         }
     }
 
-    fn declare(&self, mode: Mode, wants: Vec<Want<crate::dns::Dns>>) -> PathBuf {
-        let (fleet, dns): (Vec<_>, Vec<_>) = wants
+    /// a worker whose module, `code`, this machine keeps in its own file
+    pub fn worker(&self, name: &str, code: &str, routes: &[&str], bypass: &[&str]) -> Worker {
+        let zones = zones();
+        let module = self.dir.path().join(format!("{name}.js"));
+        std::fs::write(&module, code).unwrap();
+        let patterns = |listed: &[&str]| {
+            let mut patterns: Vec<Pattern> = listed
+                .iter()
+                .map(|pattern| Pattern::declared(pattern, &zones).unwrap())
+                .collect();
+            patterns.sort();
+            patterns
+        };
+        Worker {
+            name: ScriptName::parse(name).unwrap(),
+            source: code.as_bytes().into(),
+            module,
+            compatibility_date: CompatibilityDate::parse("2026-11-01").unwrap(),
+            routes: patterns(routes),
+            bypass: patterns(bypass),
+        }
+    }
+
+    fn declare(&self, mode: Mode, declared: Declared) -> PathBuf {
+        let (fleet, dns): (Vec<_>, Vec<_>) = declared
+            .dns
             .into_iter()
             .partition(|want| want.owner == Owner::Fleet);
-        let zones = ["example.com", "example.net", "example.org"].map(String::from);
         let desired = Desired {
             host: HostName::parse(self.host).unwrap(),
             mode,
-            zones: Zones::parse(&zones).unwrap(),
+            zones: zones(),
+            account: self.account.map(|account| Account::parse(account).unwrap()),
             dns: dns.into_iter().map(|want| want.value).collect(),
             fleet: Fleet {
                 revision: self.revision.map(Revision),
                 dns: fleet.into_iter().map(|want| want.value).collect(),
+                workers: declared.workers,
             },
         };
         let raw = self.dir.path().join("raw.json");
@@ -88,19 +134,19 @@ impl Machine {
         &self,
         fake: &Arc<fake::Cloudflare>,
         mode: Mode,
-        wants: Vec<Want<crate::dns::Dns>>,
+        declared: impl Into<Declared>,
     ) -> Health {
-        self.converge_deleting(fake, mode, wants, MAX_DELETES)
+        self.converge_deleting(fake, mode, declared, MAX_DELETES)
     }
 
-    fn converge_deleting(
+    pub fn converge_deleting(
         &self,
         fake: &Arc<fake::Cloudflare>,
         mode: Mode,
-        wants: Vec<Want<crate::dns::Dns>>,
+        declared: impl Into<Declared>,
         max_deletes: usize,
     ) -> Health {
-        let desired = self.declare(mode, wants);
+        let desired = self.declare(mode, declared.into());
         converge_with(
             &Cloudflare::Fake(fake.clone()),
             &desired,
@@ -112,12 +158,8 @@ impl Machine {
         )
     }
 
-    pub fn report(
-        &self,
-        fake: &Arc<fake::Cloudflare>,
-        wants: Vec<Want<crate::dns::Dns>>,
-    ) -> String {
-        let desired = self.declare(Mode::Report, wants);
+    pub fn report(&self, fake: &Arc<fake::Cloudflare>, declared: impl Into<Declared>) -> String {
+        let desired = self.declare(Mode::Report, declared.into());
         let (text, complete) = report_with(
             &Cloudflare::Fake(fake.clone()),
             &desired,
@@ -134,6 +176,10 @@ impl Machine {
 }
 
 const MAX_DELETES: usize = 10;
+
+fn zones() -> Zones {
+    Zones::parse(&["example.com", "example.net", "example.org"].map(String::from)).unwrap()
+}
 
 fn timing() -> Timing {
     Timing {
@@ -364,7 +410,7 @@ fn adopt_and_report_hold_every_other_step() {
 fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
-    let desired = one.declare(ENFORCE, web_1());
+    let desired = one.declare(ENFORCE, web_1().into());
     let spent = Timing {
         deadline: Duration::ZERO,
         ..timing()
@@ -402,7 +448,7 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
 fn a_missing_token_skips_the_run() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
-    let desired = one.declare(ENFORCE, web_1());
+    let desired = one.declare(ENFORCE, web_1().into());
     let missing = one.dir.path().join("not-decrypted-yet");
     let health = converge_with(
         &Cloudflare::Fake(fake.clone()),
@@ -426,7 +472,7 @@ fn a_missing_token_skips_the_run() {
 fn an_empty_token_skips_the_run() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
-    let desired = one.declare(ENFORCE, web_1());
+    let desired = one.declare(ENFORCE, web_1().into());
     std::fs::write(one.token(), "\n").unwrap();
     let health = converge_with(
         &Cloudflare::Fake(fake.clone()),
@@ -446,7 +492,7 @@ fn an_empty_token_skips_the_run() {
 fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
-    let desired = one.declare(ENFORCE, web_1());
+    let desired = one.declare(ENFORCE, web_1().into());
     let _held = Lock::acquire(&one.state(), Duration::ZERO)
         .unwrap()
         .unwrap();

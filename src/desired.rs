@@ -1,16 +1,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
     dns::{Dns, Record, RecordType, Slot},
     kind::{Ladder, Want},
     model::{Fqdn, HostName, Owner, Revision, Zones},
+    workers::{
+        Account, CompatibilityDate, Module, Pattern, Route, Routes, Script, ScriptName, Scripts,
+        fits,
+    },
 };
 
-const SCHEMA: u32 = 3;
+const SCHEMA: u32 = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -33,20 +38,50 @@ pub(crate) struct Desired {
     pub host: HostName,
     pub mode: Mode,
     pub zones: Zones,
+    /// the account the fleet's workers live in. with none, norn reads no
+    /// workers at all
+    pub account: Option<Account>,
     pub dns: Vec<Record>,
     pub fleet: Fleet,
 }
 
-/// the records every machine of the fleet declares alike
+/// what every machine of the fleet declares alike
 #[derive(Clone, PartialEq, Debug, Default)]
 pub(crate) struct Fleet {
     /// none for a configuration built from an uncommitted tree
     pub revision: Option<Revision>,
     pub dns: Vec<Record>,
+    pub workers: Vec<Worker>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Worker {
+    pub name: ScriptName,
+    pub module: PathBuf,
+    /// the module's bytes, read along with the desired file
+    pub source: Arc<[u8]>,
+    pub compatibility_date: CompatibilityDate,
+    pub routes: Vec<Pattern>,
+    /// patterns that run no worker, so requests there skip this one
+    pub bypass: Vec<Pattern>,
+}
+
+impl Worker {
+    fn script(&self) -> Script {
+        Script {
+            name: self.name.clone(),
+            compatibility_date: self.compatibility_date,
+            module: Module::declared(self.source.clone()),
+            routes: self.routes.iter().cloned().collect(),
+            bypass: self.bypass.iter().cloned().collect(),
+        }
+    }
 }
 
 pub(crate) struct Wants {
     pub dns: Vec<Want<Dns>>,
+    pub scripts: Vec<Want<Scripts>>,
+    pub routes: Vec<Want<Routes>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -162,19 +197,86 @@ impl Desired {
             records
         };
         let dns = records(&document.dns, "dns");
-        let fleet = Fleet {
-            revision: document.fleet.revision.map(Revision),
-            dns: records(&document.fleet.dns, "fleet dns"),
-        };
-        for (subject, message) in across(&dns, &fleet.dns) {
+        let fleet_dns = records(&document.fleet.dns, "fleet dns");
+        for (subject, message) in across(&dns, &fleet_dns) {
             problem(&subject, message);
         }
 
-        match (host, mode, zones) {
-            (Some(host), Some(mode), Some(zones)) if problems.is_empty() => Ok(Self {
+        let account = document
+            .account
+            .as_deref()
+            .map(|account| Account::parse(account).map_err(|message| problem("account", message)));
+        let mut workers = Vec::new();
+        let mut patterns = BTreeSet::new();
+        for declared in &document.fleet.workers {
+            let subject = format!("fleet worker {}", declared.name);
+            let name =
+                ScriptName::parse(&declared.name).map_err(|message| problem(&subject, message));
+            let source = std::fs::read(&declared.module)
+                .map(Arc::from)
+                .map_err(|error| problem(&subject, format!("{}: {error}", declared.module)));
+            let date = CompatibilityDate::parse(&declared.compatibility_date)
+                .map_err(|message| problem(&subject, message));
+            let mut parsed = |listed: &[String]| -> Vec<Pattern> {
+                let mut found = Vec::new();
+                for pattern in listed {
+                    match zones
+                        .as_ref()
+                        .map(|zones| Pattern::declared(pattern, zones))
+                    {
+                        Some(Ok(pattern)) if !patterns.insert(pattern.clone()) => {
+                            problem(
+                                &subject,
+                                format!("{pattern} is declared twice; a pattern has one route"),
+                            );
+                        }
+                        Some(Ok(pattern)) => found.push(pattern),
+                        Some(Err(message)) => problem(&subject, message),
+                        None => {}
+                    }
+                }
+                found.sort();
+                found
+            };
+            let routes = parsed(&declared.routes);
+            let bypass = parsed(&declared.bypass);
+            if let (Ok(name), Ok(source), Ok(compatibility_date)) = (name, source, date) {
+                let worker = Worker {
+                    name,
+                    module: PathBuf::from(&declared.module),
+                    source,
+                    compatibility_date,
+                    routes,
+                    bypass,
+                };
+                match fits(&worker.script()) {
+                    Ok(()) => workers.push(worker),
+                    Err(message) => problem(&subject, message),
+                }
+            }
+        }
+        workers.sort_by(|a, b| a.name.cmp(&b.name));
+        if workers.windows(2).any(|pair| pair[0].name == pair[1].name) {
+            problem("fleet workers", "a worker is declared twice".into());
+        }
+        if account.is_none() && !document.fleet.workers.is_empty() {
+            problem(
+                "account",
+                "fleet workers need cloudflare.account, the account their scripts live in".into(),
+            );
+        }
+        let fleet = Fleet {
+            revision: document.fleet.revision.map(Revision),
+            dns: fleet_dns,
+            workers,
+        };
+
+        match (host, mode, zones, account.transpose()) {
+            (Some(host), Some(mode), Some(zones), Ok(account)) if problems.is_empty() => Ok(Self {
                 host,
                 mode,
                 zones,
+                account,
                 dns,
                 fleet,
             }),
@@ -188,10 +290,17 @@ impl Desired {
             host: self.host.to_string(),
             mode: self.mode.as_str().to_owned(),
             zones: self.zones.iter().map(ToString::to_string).collect(),
+            account: self.account.as_ref().map(ToString::to_string),
             dns: self.dns.iter().map(document::Record::from).collect(),
             fleet: document::Fleet {
                 revision: self.fleet.revision.map(|Revision(revision)| revision),
                 dns: self.fleet.dns.iter().map(document::Record::from).collect(),
+                workers: self
+                    .fleet
+                    .workers
+                    .iter()
+                    .map(document::Worker::from)
+                    .collect(),
             },
         };
         let mut text = serde_json::to_string_pretty(&document).expect("the document serializes");
@@ -213,7 +322,49 @@ impl Desired {
                 value: record.clone(),
             })
             .collect();
-        Wants { dns }
+        let shared = |value| Want {
+            scope: self
+                .account
+                .clone()
+                .expect("parse checked the workers' account"),
+            owner: Owner::Fleet,
+            value,
+        };
+        let scripts = self
+            .fleet
+            .workers
+            .iter()
+            .map(|worker| shared(worker.script()))
+            .collect();
+        let routes = self
+            .fleet
+            .workers
+            .iter()
+            .flat_map(|worker| {
+                let runs = worker
+                    .routes
+                    .iter()
+                    .map(|pattern| (pattern, Some(&worker.name)));
+                let skips = worker.bypass.iter().map(|pattern| (pattern, None));
+                runs.chain(skips)
+            })
+            .map(|(pattern, script)| Want {
+                scope: pattern
+                    .zone(&self.zones)
+                    .expect("parse checked every pattern's zone")
+                    .clone(),
+                owner: Owner::Fleet,
+                value: Route {
+                    pattern: pattern.clone(),
+                    script: script.cloned(),
+                },
+            })
+            .collect();
+        Wants {
+            dns,
+            scripts,
+            routes,
+        }
     }
 }
 
@@ -301,6 +452,8 @@ mod document {
 
     use crate::dns::{Rdata, Record as Value, Ttl};
 
+    use super::Worker as Declared;
+
     #[derive(Deserialize)]
     pub struct Schema {
         pub schema: u32,
@@ -313,6 +466,7 @@ mod document {
         pub host: String,
         pub mode: String,
         pub zones: Vec<String>,
+        pub account: Option<String>,
         pub dns: Vec<Record>,
         pub fleet: Fleet,
     }
@@ -322,6 +476,32 @@ mod document {
     pub struct Fleet {
         pub revision: Option<u64>,
         pub dns: Vec<Record>,
+        pub workers: Vec<Worker>,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Worker {
+        pub name: String,
+        pub module: String,
+        pub compatibility_date: String,
+        pub routes: Vec<String>,
+        pub bypass: Vec<String>,
+    }
+
+    impl From<&Declared> for Worker {
+        fn from(worker: &Declared) -> Self {
+            let shown = |patterns: &[crate::workers::Pattern]| {
+                patterns.iter().map(ToString::to_string).collect()
+            };
+            Worker {
+                name: worker.name.to_string(),
+                module: worker.module.display().to_string(),
+                compatibility_date: worker.compatibility_date.to_string(),
+                routes: shown(&worker.routes),
+                bypass: shown(&worker.bypass),
+            }
+        }
     }
 
     #[derive(Deserialize, Serialize)]
@@ -395,12 +575,37 @@ mod tests {
         fleet: serde_json::Value,
     ) -> serde_json::Value {
         json!({
-            "schema": 3,
+            "schema": 4,
             "host": "web-1",
             "mode": "report",
             "zones": ["example.com", "example.org"],
+            "account": null,
             "dns": dns,
-            "fleet": { "revision": revision, "dns": fleet },
+            "fleet": { "revision": revision, "dns": fleet, "workers": [] },
+        })
+    }
+
+    const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
+
+    fn workers(dir: &Path, workers: serde_json::Value) -> serde_json::Value {
+        let module = dir.join("worker.js");
+        std::fs::write(&module, "export default { fetch() {} }").unwrap();
+        let mut document = document(json!([]));
+        document["account"] = json!(ACCOUNT);
+        document["fleet"]["revision"] = json!(1794942959);
+        document["fleet"]["workers"] = workers;
+        let module = module.display().to_string();
+        let text = document.to_string().replace("$MODULE", &module);
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn worker(name: &str, routes: &[&str], bypass: &[&str]) -> serde_json::Value {
+        json!({
+            "name": name,
+            "module": "$MODULE",
+            "compatibility_date": "2026-11-01",
+            "routes": routes,
+            "bypass": bypass,
         })
     }
 
@@ -513,16 +718,109 @@ mod tests {
     #[test]
     fn a_file_of_an_older_schema_is_refused() {
         let found = problems(json!({
-            "schema": 2,
+            "schema": 3,
             "host": "web-1",
             "mode": "report",
             "zones": ["example.com"],
             "dns": [],
+            "fleet": { "revision": null, "dns": [] },
         }));
         assert_eq!(
             found,
             [
-                "schema: this norn reads schema 3, not 2; rebuild the desired file with this norn's module"
+                "schema: this norn reads schema 4, not 3; rebuild the desired file with this norn's module"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_worker_reads_its_module_and_its_canonical_form_parses_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = workers(
+            dir.path(),
+            json!([worker(
+                "coeus-offline",
+                &["coeus.example.com/*"],
+                &["coeus.example.com/live/*", "coeus.example.com/api/*"]
+            )]),
+        );
+        let desired = Desired::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let worker = &desired.fleet.workers[0];
+        assert_eq!(&*worker.source, b"export default { fetch() {} }");
+        assert_eq!(
+            worker
+                .bypass
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["coeus.example.com/api/*", "coeus.example.com/live/*"]
+        );
+        let again = Desired::parse(desired.canonical().as_bytes()).unwrap();
+        assert_eq!(again, desired);
+
+        let wants = desired.wants();
+        assert_eq!(wants.scripts.len(), 1);
+        let routes: Vec<String> = wants
+            .routes
+            .iter()
+            .map(|want| format!("{} {} {}", want.scope, want.value.pattern, want.value))
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                "example.com coeus.example.com/* runs coeus-offline",
+                "example.com coeus.example.com/api/* runs no worker",
+                "example.com coeus.example.com/live/* runs no worker",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_worker_whose_mark_would_not_fit_in_its_tags_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes: Vec<String> = (0..60)
+            .map(|n| format!("site-{n:02}.example.com/*"))
+            .collect();
+        let routes: Vec<&str> = routes.iter().map(String::as_str).collect();
+        let found = problems(workers(
+            dir.path(),
+            json!([worker("coeus-offline", &routes, &[])]),
+        ));
+        assert_eq!(
+            found,
+            [
+                "fleet worker coeus-offline: its routes and bypasses take 11 tags, and cloudflare keeps 10 on a script; declare fewer"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_worker_with_a_missing_module_a_stray_route_or_no_account_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut document = workers(
+            dir.path(),
+            json!([
+                worker(
+                    "coeus-offline",
+                    &["coeus.example.com/*"],
+                    &["coeus.example.net/api/*"]
+                ),
+                worker("Other", &["coeus.example.com/*"], &[]),
+            ]),
+        );
+        document["fleet"]["workers"][1]["module"] = json!("/nonexistent/worker.js");
+        document["fleet"]["workers"][1]["compatibility_date"] = json!("2026-13-01");
+        document["account"] = json!(null);
+        let found = problems(document);
+        assert_eq!(
+            found,
+            [
+                "fleet worker coeus-offline: coeus.example.net/api/* is outside every managed zone (example.com, example.org)",
+                "fleet worker Other: \"Other\" has a character outside [a-z0-9_-]",
+                "fleet worker Other: /nonexistent/worker.js: No such file or directory (os error 2)",
+                "fleet worker Other: \"2026-13-01\" is not a date written YYYY-MM-DD",
+                "fleet worker Other: coeus.example.com/* is declared twice; a pattern has one route",
+                "account: fleet workers need cloudflare.account, the account their scripts live in",
             ]
         );
     }

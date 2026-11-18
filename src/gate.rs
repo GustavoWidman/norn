@@ -1,7 +1,7 @@
-//! whether this run may write the fleet's shared records. machines run
-//! different revisions of the configuration during a rollout, so a machine
-//! writes shared records only while nothing says a newer configuration is
-//! already in charge of them.
+//! whether this run may write the fleet's shared objects, of every kind at
+//! once. machines run different revisions of the configuration during a
+//! rollout, so a machine writes shared objects only while nothing says a
+//! newer configuration is already in charge of them.
 
 use std::{
     fmt,
@@ -46,14 +46,14 @@ impl fmt::Display for Permit {
                 deletes: Deletes::Never,
             } => write!(
                 f,
-                "write at t={revision}; with no rollout file, no retiring record is deleted"
+                "write at t={revision}; with no rollout file, no retiring object is deleted"
             ),
             Permit::Write {
                 revision,
                 deletes: Deletes::UpTo(rolled_out),
             } => write!(
                 f,
-                "write at t={revision}; retiring records stamped up to t={rolled_out} are deleted"
+                "write at t={revision}; retiring objects stamped up to t={rolled_out} are deleted"
             ),
             Permit::Hold(hold) => write!(f, "hold: {}", hold.explain()),
         }
@@ -80,7 +80,7 @@ impl Deletes {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Hold {
     Uncommitted,
-    ZoneUnread,
+    Unread,
     RolloutUnknown(String),
     Behind { rolled_out: Revision },
     Newer(Revision),
@@ -92,33 +92,33 @@ impl Hold {
             Hold::Uncommitted => {
                 "this configuration was built from an uncommitted tree, so it has no revision and writes no shared records".into()
             }
-            Hold::ZoneUnread => {
-                "a zone could not be read, so a newer configuration's shared records may be there unseen".into()
+            Hold::Unread => {
+                "a scope could not be read, so a newer configuration's shared objects may be there unseen".into()
             }
             Hold::RolloutUnknown(why) => format!("the fleet's rollout is unknown: {why}"),
             Hold::Behind { rolled_out } => format!(
                 "the fleet has rolled out t={rolled_out}, newer than this configuration"
             ),
             Hold::Newer(revision) => format!(
-                "a shared record carries t={revision}, newer than this configuration, whose machines write the shared records"
+                "a shared object carries t={revision}, newer than this configuration, whose machines write the shared objects"
             ),
         }
     }
 }
 
 /// `own` is this configuration's revision, `newest` the newest stamp on any
-/// shared record this run read
+/// shared object of any kind this run read
 pub(crate) fn permit(
     own: Option<Revision>,
     newest: Option<Revision>,
     rollout: &Rollout,
-    any_zone_unread: bool,
+    any_scope_unread: bool,
 ) -> Permit {
     let Some(own) = own else {
         return Permit::Hold(Hold::Uncommitted);
     };
-    if any_zone_unread {
-        return Permit::Hold(Hold::ZoneUnread);
+    if any_scope_unread {
+        return Permit::Hold(Hold::Unread);
     }
     let deletes = match rollout {
         Rollout::NotConfigured => Deletes::Never,
@@ -195,13 +195,7 @@ mod tests {
         };
         let cases = [
             (None, Some(NEW), unknown(), true, Permit::Hold(Uncommitted)),
-            (
-                Some(OWN),
-                Some(NEW),
-                unknown(),
-                true,
-                Permit::Hold(ZoneUnread),
-            ),
+            (Some(OWN), Some(NEW), unknown(), true, Permit::Hold(Unread)),
             (
                 Some(OWN),
                 Some(NEW),

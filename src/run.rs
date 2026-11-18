@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -14,9 +15,10 @@ use crate::{
     desired::{Desired, Mode, Problems, Wants},
     dns::Dns,
     gate::{self, Deletes, Permit, Rollout, RolloutFile},
-    kind::{Kind, Ladder, Live, Mark, Ownership, Plan, Sent, Step, Want, Withhold},
-    model::{HostName, Owner, Revision},
+    kind::{Kind, Ladder, Live, Mark, Ownership, Plan, Reading, Sent, Step, Want, Withhold},
+    model::{Owner, Revision},
     plan::plan,
+    workers::{self, Owners, Pattern, Routes, ScriptName, Scripts},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -505,7 +507,9 @@ fn shown<K: Kind>(live: &Live<K>) -> String {
 }
 
 trait Act {
-    fn on<K: Kind>(&mut self, planned: Planned<K>);
+    /// acts on one kind's plans, and returns the keys of the steps it sent
+    /// that failed
+    fn on<K: Kind>(&mut self, planned: Planned<K>) -> BTreeSet<K::Key>;
 }
 
 struct Planned<K: Kind> {
@@ -532,7 +536,7 @@ struct Show {
 }
 
 impl Act for Show {
-    fn on<K: Kind>(&mut self, planned: Planned<K>) {
+    fn on<K: Kind>(&mut self, planned: Planned<K>) -> BTreeSet<K::Key> {
         for scoped in planned.scopes {
             match scoped {
                 Scoped::Read { scope, plans, .. } => {
@@ -544,6 +548,7 @@ impl Act for Show {
                 Scoped::Unread { scope, error } => self.lines.push(unread::<K>(&scope, &error)),
             }
         }
+        BTreeSet::new()
     }
 }
 
@@ -554,7 +559,8 @@ struct Apply<'a> {
 }
 
 impl Act for Apply<'_> {
-    fn on<K: Kind>(&mut self, planned: Planned<K>) {
+    fn on<K: Kind>(&mut self, planned: Planned<K>) -> BTreeSet<K::Key> {
+        let mut failed = BTreeSet::new();
         for scoped in planned.scopes {
             match scoped {
                 Scoped::Read {
@@ -575,13 +581,17 @@ impl Act for Apply<'_> {
                             match K::write(api, &place, step, &mark) {
                                 Ok(Sent::Applied) => What::Applied(step.verb()),
                                 Ok(Sent::Raced) => What::Raced(step.verb()),
-                                Err(error) => What::Failed(step.verb(), error.to_string()),
+                                Err(error) => {
+                                    failed.insert(step.key());
+                                    What::Failed(step.verb(), error.to_string())
+                                }
                             }
                         }));
                 }
                 Scoped::Unread { scope, error } => self.lines.push(unread::<K>(&scope, &error)),
             }
         }
+        failed
     }
 }
 
@@ -596,8 +606,9 @@ fn unread<K: Kind>(scope: &K::Scope, error: &ApiError) -> Line {
     }
 }
 
-/// returns what the fleet gate decided, when shared records matter to this
-/// run
+/// returns what the fleet gate decided, when shared objects matter to this
+/// run. every kind is read before anything is planned, so one gate and one
+/// delete cap cover the whole run.
 fn visit<C: Capability>(
     api: &Api<C>,
     desired: &Desired,
@@ -605,62 +616,265 @@ fn visit<C: Capability>(
     max_deletes: usize,
     act: &mut impl Act,
 ) -> Option<Permit> {
-    let Wants { dns } = desired.wants();
-    let zones = desired.zones.iter().cloned().collect();
-    let (gate, planned) = plan_kind::<Dns, C>(
-        api,
-        &desired.host,
-        desired.fleet.revision,
-        rollout,
-        zones,
+    let Wants {
         dns,
-        max_deletes,
-    );
-    act.on(planned);
-    gate
-}
-
-fn plan_kind<K: Kind, C: Capability>(
-    api: &Api<C>,
-    host: &HostName,
-    revision: Option<Revision>,
-    rollout: &Rollout,
-    scopes: Vec<K::Scope>,
-    wants: Vec<Want<K>>,
-    max_deletes: usize,
-) -> (Option<Permit>, Planned<K>) {
-    let read: Vec<_> = scopes
-        .into_iter()
-        .map(|scope| {
-            let read = K::read(api, &scope);
-            (scope, read)
-        })
-        .collect();
-    let newest = read
-        .iter()
-        .filter_map(|(_, read)| read.as_ref().ok())
-        .flat_map(|(_, live)| live)
-        .filter_map(|live| match live.ownership {
-            Ownership::Fleet(stamp) => Some(stamp.revision),
-            _ => None,
-        })
-        .max();
-    let unread = read.iter().any(|(_, read)| read.is_err());
-    let permit = gate::permit(revision, newest, rollout, unread);
-    let (deletes, hold, fleet) = match &permit {
-        Permit::Write { revision, deletes } => (*deletes, None, Some(Mark::Fleet(*revision))),
-        Permit::Hold(hold) => (Deletes::Never, Some(Withhold::Fleet(hold.clone())), None),
+        mut scripts,
+        routes,
+    } = desired.wants();
+    let own = desired.fleet.revision;
+    let zones: Vec<_> = desired.zones.iter().cloned().collect();
+    let dns_read = Scopes::<Dns>::read(api, zones.clone(), &());
+    let (script_read, route_read) = match &desired.account {
+        None => (Scopes::default(), Scopes::default()),
+        Some(account) => {
+            let script_read = Scopes::<Scripts>::read(api, vec![account.clone()], &());
+            // whose a route is depends on whose its script is
+            let route_read = match script_read.failure() {
+                Some(error) => Scopes::failed(zones, error),
+                None => {
+                    let owners = Owners::new(script_read.live(), &routes, own);
+                    Scopes::<Routes>::read(api, zones, &owners)
+                }
+            };
+            workers::listings(&mut scripts, script_read.live(), route_read.live());
+            (script_read, route_read)
+        }
     };
-    let shared = revision.is_some()
+
+    let newest = [dns_read.newest(), script_read.newest(), route_read.newest()]
+        .into_iter()
+        .flatten()
+        .max();
+    let unread = dns_read.unread() || script_read.unread() || route_read.unread();
+    let permit = gate::permit(own, newest, rollout, unread);
+    let shared = own.is_some()
         || newest.is_some()
-        || wants.iter().any(|want| want.owner == Owner::Fleet);
+        || dns.iter().any(|want| want.owner == Owner::Fleet)
+        || !scripts.is_empty()
+        || !routes.is_empty();
     if let (true, Rollout::Unknown(why)) = (shared, rollout) {
         log::warn!("the fleet's rollout is unknown: {why}");
     }
-    let owners = [Owner::Host(host.clone()), Owner::Fleet];
+    let fleet = Fleet::new(&permit);
+    let host = Owner::Host(desired.host.clone());
 
-    let plan_all = |breaker: Option<&Withhold>| -> Vec<Scoped<K>> {
-        read.iter()
+    // the cap counts the deletes a run would send, so it counts them once
+    // the steps one kind holds for another are held
+    let plan_all = |breaker: Option<&Withhold>| {
+        let mut script_plans = script_read.plan(&host, &scripts, breaker, &fleet);
+        let mut route_plans = route_read.plan(&host, &routes, breaker, &fleet);
+        settle(
+            &mut script_plans,
+            &mut route_plans,
+            &script_read,
+            &route_read,
+        );
+        (
+            dns_read.plan(&host, &dns, breaker, &fleet),
+            script_plans,
+            route_plans,
+        )
+    };
+    let (mut dns_plans, mut script_plans, mut route_plans) = plan_all(None);
+    let planned = deletes(&dns_plans) + deletes(&script_plans) + deletes(&route_plans);
+    if planned > max_deletes {
+        let breaker = Withhold::Breaker {
+            planned,
+            max: max_deletes,
+        };
+        (dns_plans, script_plans, route_plans) = plan_all(Some(&breaker));
+    }
+
+    act.on(Planned {
+        scopes: dns_plans,
+        fleet: fleet.mark.clone(),
+    });
+    let listings: Vec<(ScriptName, Pattern)> = steps(&script_plans)
+        .filter_map(|step| match step {
+            Step::Create { want, .. } | Step::Update { want, .. } => Some(want),
+            _ => None,
+        })
+        .flat_map(|script| {
+            let listed = script.routes.iter().chain(&script.bypass);
+            listed.map(|pattern| (script.name.clone(), pattern.clone()))
+        })
+        .collect();
+    let failed = act.on(Planned {
+        scopes: script_plans,
+        fleet: fleet.mark.clone(),
+    });
+    // a route written while the script that lists it is not would be no
+    // one's, so it waits for that script
+    let unlisted: BTreeMap<Pattern, ScriptName> = listings
+        .into_iter()
+        .filter(|(script, _)| failed.contains(script))
+        .map(|(script, pattern)| (pattern, script))
+        .collect();
+    for plan in plans(&mut route_plans) {
+        plan.withhold(|step| match step {
+            Step::Create { .. } | Step::Update { .. } => unlisted
+                .get(&step.key())
+                .map(|script| Withhold::Unlisted(script.to_string())),
+            _ => None,
+        });
+    }
+    act.on(Planned {
+        scopes: route_plans,
+        fleet: fleet.mark.clone(),
+    });
+    shared.then_some(permit)
+}
+
+/// orders a worker's script and its routes across the two kinds: a route
+/// runs a script only once the script is the fleet's, or is written in this
+/// same run before it, and a script is deleted only once the bypasses it
+/// lists are gone. deleting a script deletes the routes that run it, so those
+/// need not go first.
+fn settle(
+    scripts: &mut [Scoped<Scripts>],
+    routes: &mut [Scoped<Routes>],
+    script_read: &Scopes<Scripts>,
+    route_read: &Scopes<Routes>,
+) {
+    let written = steps(scripts)
+        .filter(|step| matches!(step, Step::Create { .. } | Step::Update { .. }))
+        .map(Step::key);
+    let ready: BTreeSet<ScriptName> = script_read
+        .live()
+        .filter(|live| matches!(live.ownership, Ownership::Fleet(_)))
+        .map(|live| live.key.clone())
+        .chain(written)
+        .collect();
+    let bypasses: BTreeSet<&Pattern> = route_read
+        .live()
+        .filter(|live| {
+            live.value
+                .as_ref()
+                .is_some_and(|route| route.script.is_none())
+        })
+        .map(|live| &live.key)
+        .collect();
+
+    for plan in plans(scripts) {
+        plan.withhold(|step| match step {
+            Step::Delete { live, .. }
+                if live.value.as_ref().is_some_and(|script| {
+                    script
+                        .bypass
+                        .iter()
+                        .any(|pattern| bypasses.contains(pattern))
+                }) =>
+            {
+                Some(Withhold::Bypassed)
+            }
+            _ => None,
+        });
+    }
+    for plan in plans(routes) {
+        plan.withhold(|step| match step {
+            Step::Create { want, .. } | Step::Update { want, .. } => want
+                .script
+                .as_ref()
+                .filter(|script| !ready.contains(*script))
+                .map(|script| Withhold::Unscripted(script.to_string())),
+            _ => None,
+        });
+    }
+}
+
+/// what the gate lets the fleet's plans do this run
+struct Fleet {
+    deletes: Deletes,
+    hold: Option<Withhold>,
+    /// the mark the fleet's plans write, when the gate permits them to
+    mark: Option<Mark>,
+}
+
+impl Fleet {
+    fn new(permit: &Permit) -> Self {
+        match permit {
+            Permit::Write { revision, deletes } => Self {
+                deletes: *deletes,
+                hold: None,
+                mark: Some(Mark::Fleet(*revision)),
+            },
+            Permit::Hold(hold) => Self {
+                deletes: Deletes::Never,
+                hold: Some(Withhold::Fleet(hold.clone())),
+                mark: None,
+            },
+        }
+    }
+}
+
+/// one kind's scopes as this run read them
+struct Scopes<K: Kind> {
+    scopes: Vec<(K::Scope, Reading<K>)>,
+}
+
+impl<K: Kind> Default for Scopes<K> {
+    fn default() -> Self {
+        Self { scopes: Vec::new() }
+    }
+}
+
+impl<K: Kind> Scopes<K> {
+    fn read<C: Capability>(api: &Api<C>, scopes: Vec<K::Scope>, context: &K::Context) -> Self {
+        let scopes = scopes
+            .into_iter()
+            .map(|scope| {
+                let read = K::read(api, &scope, context);
+                (scope, read)
+            })
+            .collect();
+        Self { scopes }
+    }
+
+    /// scopes left unread because what reading them needs could not be read
+    fn failed(scopes: Vec<K::Scope>, error: ApiError) -> Self {
+        let scopes = scopes
+            .into_iter()
+            .map(|scope| (scope, Err(error.clone())))
+            .collect();
+        Self { scopes }
+    }
+
+    fn failure(&self) -> Option<ApiError> {
+        self.scopes
+            .iter()
+            .find_map(|(_, read)| read.as_ref().err().cloned())
+    }
+
+    fn live(&self) -> impl Iterator<Item = &Live<K>> {
+        self.scopes
+            .iter()
+            .filter_map(|(_, read)| read.as_ref().ok())
+            .flat_map(|(_, live)| live)
+    }
+
+    fn newest(&self) -> Option<Revision> {
+        self.live()
+            .filter_map(|live| match live.ownership {
+                Ownership::Fleet(stamp) => Some(stamp.revision),
+                _ => None,
+            })
+            .max()
+    }
+
+    fn unread(&self) -> bool {
+        self.scopes.iter().any(|(_, read)| read.is_err())
+    }
+
+    fn plan(
+        &self,
+        host: &Owner,
+        wants: &[Want<K>],
+        breaker: Option<&Withhold>,
+        fleet: &Fleet,
+    ) -> Vec<Scoped<K>> {
+        let owners = [host.clone(), Owner::Fleet];
+        self.scopes
+            .iter()
             .map(|(scope, read)| match read {
                 Ok((place, live)) => Scoped::Read {
                     scope: scope.clone(),
@@ -673,8 +887,8 @@ fn plan_kind<K: Kind, C: Capability>(
                                 .filter(|want| want.scope == *scope && want.owner == *owner)
                                 .cloned()
                                 .collect();
-                            let mut plan = plan(owner, mine, live.clone(), breaker, deletes);
-                            if let (Owner::Fleet, Some(hold)) = (owner, &hold) {
+                            let mut plan = plan(owner, mine, live.clone(), breaker, fleet.deletes);
+                            if let (Owner::Fleet, Some(hold)) = (owner, &fleet.hold) {
                                 plan.hold(hold.clone());
                             }
                             plan
@@ -687,26 +901,30 @@ fn plan_kind<K: Kind, C: Capability>(
                 },
             })
             .collect()
-    };
-    let scopes = plan_all(None);
-    let planned = scopes
+    }
+}
+
+fn plans<K: Kind>(scopes: &mut [Scoped<K>]) -> impl Iterator<Item = &mut Plan<K>> {
+    scopes.iter_mut().flat_map(|scoped| match scoped {
+        Scoped::Read { plans, .. } => plans.as_mut_slice(),
+        Scoped::Unread { .. } => &mut [],
+    })
+}
+
+fn steps<K: Kind>(scopes: &[Scoped<K>]) -> impl Iterator<Item = &Step<K>> {
+    scopes
         .iter()
         .flat_map(|scoped| match scoped {
             Scoped::Read { plans, .. } => plans.as_slice(),
             Scoped::Unread { .. } => &[],
         })
         .flat_map(|plan| &plan.steps)
+}
+
+fn deletes<K: Kind>(scopes: &[Scoped<K>]) -> usize {
+    steps(scopes)
         .filter(|step| matches!(step, Step::Delete { .. }))
-        .count();
-    let scopes = if planned > max_deletes {
-        plan_all(Some(&Withhold::Breaker {
-            planned,
-            max: max_deletes,
-        }))
-    } else {
-        scopes
-    };
-    (shared.then_some(permit), Planned { scopes, fleet })
+        .count()
 }
 
 pub(crate) struct Lock {

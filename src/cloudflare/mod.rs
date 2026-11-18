@@ -42,9 +42,9 @@ use std::{fmt, io, marker::PhantomData, path::Path, sync::Arc};
 use serde::{Serialize, de::DeserializeOwned};
 use zeroize::Zeroizing;
 
-pub use http::Clock;
 #[cfg(test)]
 pub(crate) use http::{Answer, Deliver, Fetch};
+pub use http::{Clock, Payload};
 
 mod sealed {
     pub trait Sealed {}
@@ -106,7 +106,7 @@ impl Api<Write> {
         }
     }
 
-    /// one write. `path` is relative to `/client/v4`.
+    /// one write with a json body. `path` is relative to `/client/v4`.
     pub fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         verb: Verb,
@@ -116,8 +116,22 @@ impl Api<Write> {
         let body = body
             .map(serde_json::to_vec)
             .transpose()
-            .map_err(|error| ApiError::Garbled(error.to_string()))?;
+            .map_err(|error| ApiError::Garbled(error.to_string()))?
+            .map(|bytes| Payload {
+                content_type: "application/json".into(),
+                bytes,
+            });
         self.sender.send(verb, path, body)
+    }
+
+    /// one write with a body of any media type
+    pub fn upload<T: DeserializeOwned>(
+        &self,
+        verb: Verb,
+        path: &str,
+        body: Payload,
+    ) -> Result<T, ApiError> {
+        self.sender.send(verb, path, Some(body))
     }
 }
 
