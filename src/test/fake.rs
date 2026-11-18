@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -24,6 +24,8 @@ struct State {
     scripts: BTreeMap<String, BTreeMap<String, Script>>,
     /// by zone id
     routes: BTreeMap<String, Vec<Value>>,
+    /// zone ids whose routes the token may not touch
+    forbidden: BTreeSet<String>,
     requests: Vec<String>,
     serial: u64,
 }
@@ -101,6 +103,14 @@ impl Cloudflare {
         let route =
             json!({ "id": format!("{:032x}", state.serial), "pattern": pattern, "script": script });
         state.routes.entry(id).or_default().push(route);
+    }
+
+    /// a token without workers routes permission on `zone`: its routes
+    /// answer 403
+    pub fn forbid_routes(&self, zone: &str) {
+        let mut state = self.state.lock().unwrap();
+        let id = state.zone_id(zone);
+        state.forbidden.insert(id);
     }
 
     pub fn scripts(&self, account: &str) -> BTreeMap<String, Script> {
@@ -201,6 +211,19 @@ fn ok(result: Value, info: Option<Value>) -> Answer {
     Ok((200, serde_json::to_vec(&body).unwrap()))
 }
 
+/// the 403 cloudflare gives a token that lacks workers routes permission on
+/// a zone: pretty-printed, with an error that carries no code
+const FORBIDDEN: &str = r#"{
+  "result": null,
+  "success": false,
+  "errors": [
+    {
+      "message": "Authentication error"
+    }
+  ],
+  "messages": []
+}"#;
+
 fn refused(status: u16, code: u32, message: &str) -> Answer {
     let body = json!({ "success": false, "errors": [{ "code": code, "message": message }], "messages": [], "result": null });
     Ok((status, serde_json::to_vec(&body).unwrap()))
@@ -240,6 +263,9 @@ impl Fetch for Cloudflare {
             ["zones", zone, "workers", "routes"] => {
                 if !state.records.contains_key(*zone) {
                     return refused(404, 7003, "Could not route to /zones");
+                }
+                if state.forbidden.contains(*zone) {
+                    return Ok((403, FORBIDDEN.as_bytes().to_vec()));
                 }
                 let routes = state.routes.get(*zone).cloned().unwrap_or_default();
                 return ok(json!(routes), None);
@@ -487,6 +513,9 @@ impl State {
     fn route(&mut self, verb: Verb, zone: &str, id: Option<&str>, body: Option<Value>) -> Answer {
         if !self.records.contains_key(zone) {
             return refused(404, 7003, "Could not route to /zones");
+        }
+        if self.forbidden.contains(zone) {
+            return Ok((403, FORBIDDEN.as_bytes().to_vec()));
         }
         self.serial += 1;
         let serial = self.serial;

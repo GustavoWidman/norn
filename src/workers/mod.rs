@@ -17,7 +17,7 @@ use crate::{
     cloudflare::{Api, ApiError, Capability, Verb, Write},
     dns::ZoneId,
     kind::{Born, Kind, Live, Mark, Ownership, Reading, Sent, Stamp, Step, Want},
-    model::{Owner, Revision, Zone},
+    model::{Owner, Revision, Zone, Zones},
 };
 
 #[derive(Clone, Debug)]
@@ -185,6 +185,21 @@ impl Owners {
                 .collect(),
             own,
         }
+    }
+
+    /// the managed zones a route that matters to the fleet can be in: those
+    /// of the patterns this configuration declares, and those of the
+    /// patterns a fleet script lists. every fleet route is listed by the
+    /// script it belongs to, so a route in any other zone is someone else's,
+    /// and stands in no declared route's way; that zone's routes are never
+    /// read, and a token need not reach them.
+    pub fn zones(&self, managed: &Zones) -> Vec<Zone> {
+        let listed = (self.scripts.values())
+            .flat_map(|(_, script)| script.routes.iter().chain(&script.bypass));
+        let zones: BTreeSet<&Zone> = (self.declared.iter().chain(listed))
+            .filter_map(|pattern| pattern.zone(managed))
+            .collect();
+        zones.into_iter().cloned().collect()
     }
 
     /// a route is the fleet's when a fleet script lists its pattern: as a

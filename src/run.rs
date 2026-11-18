@@ -628,12 +628,13 @@ fn visit<C: Capability>(
         None => (Scopes::default(), Scopes::default()),
         Some(account) => {
             let script_read = Scopes::<Scripts>::read(api, vec![account.clone()], &());
-            // whose a route is depends on whose its script is
+            // whose a route is, and so which zones hold the fleet's routes,
+            // depends on whose its script is
             let route_read = match script_read.failure() {
                 Some(error) => Scopes::failed(zones, error),
                 None => {
                     let owners = Owners::new(script_read.live(), &routes, own);
-                    Scopes::<Routes>::read(api, zones, &owners)
+                    Scopes::<Routes>::read(api, owners.zones(&desired.zones), &owners)
                 }
             };
             workers::listings(&mut scripts, script_read.live(), route_read.live());
