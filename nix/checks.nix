@@ -79,6 +79,15 @@ let
   };
   desktop.services.norn.enable = false;
   tunnel.cloudflare.fleet.dns."tunnel.example.com".cname.target = "abc.cfargotunnel.com";
+  offline = {
+    cloudflare.account = "0123456789abcdef0123456789abcdef";
+    cloudflare.fleet.workers.coeus-offline = {
+      module = pkgs.writeText "worker.js" "export default { fetch: (request) => fetch(request) };";
+      compatibilityDate = "2026-11-01";
+      routes = [ "coeus.example.com/*" ];
+      bypass = [ "coeus.example.com/api/*" ];
+    };
+  };
 
   cases = {
     clean = {
@@ -178,6 +187,37 @@ let
         "norn: web-2 declares other fleet records than web-1; every machine declares the same cloudflare.fleet.dns."
       ];
     };
+    workers-clean = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          offline
+        ];
+        web-2 = with' [
+          web-2
+          offline
+        ];
+        inherit desktop;
+      };
+      expect = [ ];
+    };
+    workers-disagree = {
+      fleet = {
+        web-1 = with' [
+          web-1
+          offline
+        ];
+        web-2 = with' [
+          web-2
+          offline
+          { cloudflare.fleet.workers.coeus-offline.bypass = lib.mkForce [ ]; }
+        ];
+      };
+      expect = [
+        "norn: web-1 declares other fleet workers than web-2; every machine declares the same cloudflare.fleet.workers and cloudflare.account."
+        "norn: web-2 declares other fleet workers than web-1; every machine declares the same cloudflare.fleet.workers and cloudflare.account."
+      ];
+    };
     fleet-without-addresses = {
       fleet = {
         web-1 = with' [
@@ -215,6 +255,7 @@ let
       web-1 = with' [
         web-1
         tunnel
+        offline
         {
           services.norn = {
             revision = 1794942959;
@@ -228,6 +269,14 @@ let
       web-1 = with' [
         web-1
         { cloudflare.dns."cache.example.net".a = { }; }
+      ];
+    }).web-1.config;
+  strayRoute =
+    (fleet {
+      web-1 = with' [
+        web-1
+        offline
+        { cloudflare.fleet.workers.coeus-offline.routes = lib.mkForce [ "coeus.example.net/*" ]; }
       ];
     }).web-1.config;
 in
@@ -249,7 +298,12 @@ in
     grep -q '"content": "v=spf1 -all"' ${(machine "web-2").services.norn.desired}
     grep -q '"content": "192.0.2.10"' ${(machine "web-1").services.norn.desired}
     ${lib.optionalString (!lib.hasInfix "--max-deletes 10" (toString (machine "web-1").services.norn.arguments)) "false"}
-    grep -q '"schema": 3' ${sharing.services.norn.desired}
+    grep -q '"schema": 4' ${sharing.services.norn.desired}
+    grep -q '"account": "0123456789abcdef0123456789abcdef"' ${sharing.services.norn.desired}
+    grep -q '"name": "coeus-offline"' ${sharing.services.norn.desired}
+    grep -q '"coeus.example.com/api/\*"' ${sharing.services.norn.desired}
+    grep -q '"module": "/nix/store/.*-worker.js"' ${sharing.services.norn.desired}
+    grep -q '"account": null' ${(machine "web-1").services.norn.desired}
     grep -q '"revision": 1794942959' ${sharing.services.norn.desired}
     grep -q '"content": "abc.cfargotunnel.com"' ${sharing.services.norn.desired}
     grep -q '"revision": null' ${(machine "web-1").services.norn.desired}
@@ -261,6 +315,8 @@ in
   module-desired-refuses = pkgs.runCommandLocal "norn-module-desired-refuses" { } ''
     grep -q 'cache.example.net is outside every managed zone (example.com, example.org)' \
       ${pkgs.testers.testBuildFailure broken.services.norn.desired}/testBuildFailure.log
+    grep -q 'coeus.example.net/\* is outside every managed zone (example.com, example.org)' \
+      ${pkgs.testers.testBuildFailure strayRoute.services.norn.desired}/testBuildFailure.log
     touch "$out"
   '';
 }
