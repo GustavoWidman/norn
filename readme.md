@@ -292,9 +292,11 @@ all. cloudflare picks the most specific pattern that matches, so
 never touch the worker. every machine running norn declares the same workers
 and the same account, or the build fails.
 
-with `cloudflare.account` set, every run reads the account's scripts and the
-worker routes of every managed zone, whether any worker is declared or not.
-keep it set while anything norn wrote could still be there, or nothing
+with `cloudflare.account` set, every run reads the account's scripts, whether
+any worker is declared or not. it reads the worker routes of a zone only when
+a declared pattern, or one a fleet script's tags list, sits in it: a fleet
+route is always listed by its script, so no other zone can hold one. keep the
+account set while anything norn wrote could still be there, or nothing
 retires it.
 
 ### the script's mark
@@ -405,9 +407,13 @@ nothing was written: report only reads. adopt writes the mark into a record's co
 
 norn needs a cloudflare api token with zone read and dns edit on the zones it
 manages. with `cloudflare.account` set, it also needs workers scripts write
-on that account and workers routes write on every zone it manages, since it
-reads the routes of all of them. keep it in a secret (agenix, sops-nix,
-whatever you like) and point `services.norn.tokenFile` at it. only the path ends up in the nix store.
+on that account and workers routes write on the zones the fleet's routes and
+bypasses sit in. the other zones' routes are never read, so the token can
+leave them out. moving a route to another zone needs both zones until the old
+route is gone, since norn deletes it from the zone it left. if a zone that
+does matter answers 403, it counts as unread and the gate holds. keep the
+token in a secret (agenix, sops-nix, whatever you like) and point
+`services.norn.tokenFile` at it. only the path ends up in the nix store.
 
 ## running it
 
