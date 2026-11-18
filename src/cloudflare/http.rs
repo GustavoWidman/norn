@@ -228,16 +228,8 @@ impl Sender {
 #[derive(Deserialize)]
 struct Envelope<T> {
     success: bool,
-    #[serde(default)]
-    errors: Vec<Message>,
     result: Option<T>,
     result_info: Option<ResultInfo>,
-}
-
-#[derive(Deserialize)]
-struct Message {
-    code: u32,
-    message: String,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -255,24 +247,52 @@ fn envelope<T: DeserializeOwned>(
     if status == 404 {
         return Err(ApiError::NotFound);
     }
-    if body.is_empty() && (200..300).contains(&status) {
+    let rejected = || ApiError::Rejected {
+        status,
+        errors: errors(body),
+    };
+    if !(200..300).contains(&status) {
+        return Err(rejected());
+    }
+    if body.is_empty() {
         let nothing = serde_json::from_value(serde_json::Value::Null)
             .map_err(|error| ApiError::Garbled(error.to_string()))?;
         return Ok((nothing, None));
     }
     let envelope: Envelope<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|error| ApiError::Garbled(format!("status {status}: {error}")))?;
-    if !envelope.success || !(200..300).contains(&status) {
-        let errors = envelope
-            .errors
-            .into_iter()
-            .map(|error| (error.code, error.message))
-            .collect();
-        return Err(ApiError::Rejected { status, errors });
+    if !envelope.success {
+        return Err(rejected());
     }
     let result = serde_json::from_value(envelope.result.unwrap_or(serde_json::Value::Null))
         .map_err(|error| ApiError::Garbled(error.to_string()))?;
     Ok((result, envelope.result_info))
+}
+
+/// the errors an answer lists, read as loosely as cloudflare writes them:
+/// each one's code where it has one, and its message. a body that is not
+/// json, or lists no errors, has none.
+fn errors(body: &[u8]) -> Vec<(Option<u32>, String)> {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let listed = body.get("errors").and_then(serde_json::Value::as_array);
+    listed
+        .into_iter()
+        .flatten()
+        .map(|error| {
+            let code = error
+                .get("code")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|code| u32::try_from(code).ok());
+            let message = error
+                .get("message")
+                .unwrap_or(error)
+                .as_str()
+                .unwrap_or_default();
+            (code, message.to_owned())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -283,10 +303,6 @@ mod tests {
     fn an_empty_success_is_nothing() {
         let (nothing, _) = envelope::<serde_json::Value>(200, b"").unwrap();
         assert_eq!(nothing, serde_json::Value::Null);
-        assert!(matches!(
-            envelope::<serde_json::Value>(502, b""),
-            Err(ApiError::Garbled(_))
-        ));
     }
 
     #[test]
@@ -296,9 +312,38 @@ mod tests {
             Err(ApiError::Rejected {
                 status: 400,
                 errors,
-            }) => assert_eq!(errors[0].0, 81058),
+            }) => assert_eq!(errors[0].0, Some(81058)),
             other => panic!("{:?}", other.map(|(value, _)| value)),
         }
+    }
+
+    #[test]
+    fn an_error_answer_keeps_its_status_and_what_message_it_has() {
+        let shown = |status, body: &[u8]| {
+            envelope::<serde_json::Value>(status, body)
+                .map(|(value, _)| value)
+                .unwrap_err()
+                .to_string()
+        };
+        let uncoded = br#"{
+  "result": null,
+  "success": false,
+  "errors": [
+    {
+      "message": "Authentication error"
+    }
+  ],
+  "messages": []
+}"#;
+        assert_eq!(
+            shown(403, uncoded),
+            "cloudflare refused it (403): Authentication error"
+        );
+        assert_eq!(
+            shown(502, b"<html>bad gateway</html>"),
+            "cloudflare refused it (502)"
+        );
+        assert_eq!(shown(503, b""), "cloudflare refused it (503)");
     }
 
     #[test]
