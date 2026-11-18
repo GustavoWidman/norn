@@ -707,3 +707,103 @@ fn a_delete_held_for_another_kind_does_not_count_toward_the_cap() {
     );
     assert!(fake.scripts(ACCOUNT).is_empty());
 }
+
+/// a token that may touch worker routes in `zones` alone, as a token scoped
+/// to the zones that carry the fleet's routes is
+fn routes_only_in(fake: &fake::Cloudflare, zones: &[&str]) {
+    for zone in ["example.com", "example.net", "example.org"] {
+        if !zones.contains(&zone) {
+            fake.forbid_routes(zone);
+        }
+    }
+}
+
+#[test]
+fn zones_with_no_route_of_the_fleet_are_not_read() {
+    let fake = account();
+    routes_only_in(&fake, &["example.com"]);
+    let machine = at(NEW, WEB_1);
+    let mut declared = site(&machine, "v1");
+    declared.dns = vec![shared("CNAME", "coeus.example.org", "tunnel.example.net")];
+
+    assert_eq!(
+        machine.converge(&fake, ENFORCE, declared),
+        Health::Converged,
+        "{:#?}",
+        lines(&machine)
+    );
+    assert_eq!(
+        routes(&fake),
+        [route(SITE, Some(OFFLINE)), route(API, None)]
+    );
+    assert!(
+        fake.records("example.org")
+            .iter()
+            .any(|record| record["name"] == "coeus.example.org"),
+        "the shared record is written"
+    );
+    let report = machine.report(&fake, site(&machine, "v1"));
+    for zone in ["example.net", "example.org"] {
+        assert!(
+            !report.contains(&format!("worker route · {zone}")),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn a_route_moved_to_another_zone_is_deleted_from_the_zone_it_left() {
+    let fake = account();
+    routes_only_in(&fake, &["example.com", "example.net"]);
+    let net = "coeus.example.net/*";
+    let mut machine = at(OLD, WEB_1);
+    machine.rolled_out(OLD, FRESH);
+    machine.converge(&fake, ENFORCE, offline(&machine, "v1", &[SITE], &[]));
+    assert_eq!(routes(&fake), [route(SITE, Some(OFFLINE))]);
+
+    machine.revision = Some(NEW);
+    machine.rolled_out(NEW, FRESH);
+    let moved = |machine: &Machine| offline(machine, "v1", &[net], &[]);
+    assert_eq!(
+        machine.converge(&fake, ENFORCE, moved(&machine)),
+        Health::Converged,
+        "{:#?}",
+        lines(&machine)
+    );
+    assert!(
+        routes(&fake).is_empty(),
+        "the script's tags still list the route it left, so its zone is read"
+    );
+    assert_eq!(fake.routes("example.net"), [route(net, Some(OFFLINE))]);
+    machine.converge(&fake, ENFORCE, moved(&machine));
+    assert_eq!(tags(&fake), mark(NEW, false, "v1", &[net], &[]));
+}
+
+#[test]
+fn a_zone_the_fleets_routes_are_in_still_holds_the_gate_when_it_answers_403() {
+    let fake = account();
+    routes_only_in(&fake, &["example.net"]);
+    let machine = at(NEW, WEB_1);
+    let mut declared = site(&machine, "v1");
+    declared.dns = vec![shared("CNAME", "coeus.example.org", "tunnel.example.net")];
+
+    assert_eq!(machine.converge(&fake, ENFORCE, declared), Health::Failing);
+    assert!(fake.writes().is_empty(), "{:#?}", fake.writes());
+    let status = status::read(&machine.state()).unwrap();
+    assert_eq!(status.counts.unread, 1, "{:#?}", status.lines);
+    assert!(
+        status.lines.contains(
+            &"unread: worker route example.com: cloudflare refused it (403): Authentication error"
+                .to_owned()
+        ),
+        "{:#?}",
+        status.lines
+    );
+    assert!(
+        status.lines.iter().any(|line| line.starts_with("held: ")
+            && line.contains("coeus.example.org")
+            && line.ends_with("a scope could not be read, so a newer configuration's shared objects may be there unseen")),
+        "{:#?}",
+        status.lines
+    );
+}
