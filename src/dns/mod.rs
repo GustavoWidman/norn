@@ -135,7 +135,12 @@ impl Kind for Dns {
                     owner: Owner::Fleet,
                     ..
                 },
-            ) if errors.iter().any(|(code, _)| RACED.contains(code)) => Ok(Sent::Raced),
+            ) if errors
+                .iter()
+                .any(|(code, _)| RACED.map(Some).contains(code)) =>
+            {
+                Ok(Sent::Raced)
+            }
             (Err(error), _) => Err(error),
         }
     }

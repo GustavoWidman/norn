@@ -209,10 +209,11 @@ pub enum ApiError {
     TimedOut(std::time::Duration),
     /// no connection, a tls or a name resolution failure
     Unreachable(String),
-    /// cloudflare answered `success: false`; its codes and messages, verbatim
+    /// cloudflare answered an error status or `success: false`; the errors
+    /// its answer lists, each one's code where it has one and its message
     Rejected {
         status: u16,
-        errors: Vec<(u32, String)>,
+        errors: Vec<(Option<u32>, String)>,
     },
     NotFound,
     /// a lookup that must find exactly one object found none, e.g. a zone the token cannot see
@@ -231,7 +232,10 @@ impl fmt::Display for ApiError {
             ApiError::Rejected { status, errors } => {
                 write!(f, "cloudflare refused it ({status})")?;
                 for (code, message) in errors {
-                    write!(f, ": {code} {message}")?;
+                    match code {
+                        Some(code) => write!(f, ": {code} {message}")?,
+                        None => write!(f, ": {message}")?,
+                    }
                 }
                 Ok(())
             }
