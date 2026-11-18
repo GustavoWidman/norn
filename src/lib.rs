@@ -8,6 +8,7 @@ mod plan;
 mod report;
 mod run;
 mod status;
+mod workers;
 
 #[cfg(test)]
 mod test;

@@ -10,7 +10,12 @@ use crate::{
 
 pub(crate) trait Kind: Sized + Clone + Debug {
     const NAME: &'static str;
+    /// whether an unmarked object that equals a declaration can be claimed by
+    /// writing the mark onto it
+    const ADOPTS: bool;
 
+    /// what reading a scope needs to know besides the scope
+    type Context;
     type Scope: Ord + Clone + Display + Debug;
     type Place: Clone + Debug;
     type Key: Ord + Clone + Display + Debug;
@@ -28,7 +33,8 @@ pub(crate) trait Kind: Sized + Clone + Debug {
     fn read<C: Capability>(
         api: &Api<C>,
         scope: &Self::Scope,
-    ) -> Result<(Self::Place, Vec<Live<Self>>), ApiError>;
+        context: &Self::Context,
+    ) -> Reading<Self>;
 
     /// sends one step; every object it creates or rewrites carries `mark`
     fn write(
@@ -38,6 +44,9 @@ pub(crate) trait Kind: Sized + Clone + Debug {
         mark: &Mark,
     ) -> Result<Sent, ApiError>;
 }
+
+/// one scope as a run read it: where its objects live, and the objects
+pub(crate) type Reading<K> = Result<(<K as Kind>::Place, Vec<Live<K>>), ApiError>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Sent {
@@ -238,6 +247,8 @@ pub(crate) enum Why {
     Owned(Owner),
     Unreadable,
     Occupied,
+    /// an object norn did not write, of a kind it cannot claim
+    Taken,
     Excludes,
     /// a shared object this plan retires excludes it; it is created in the
     /// run that deletes that object
@@ -271,6 +282,9 @@ impl Why {
             Why::Occupied => {
                 "an object norn does not own sits in this slot; adopt or remove it first".into()
             }
+            Why::Taken => {
+                "an object norn does not own sits in this slot, and norn cannot claim one it did not write; remove it first".into()
+            }
             Why::Excludes => {
                 "a CNAME shares its name with nothing, and something else is there".into()
             }
@@ -302,13 +316,26 @@ pub(crate) enum Withhold {
         dropped: Revision,
         deletes: Deletes,
     },
+    /// a script waits until the bypasses it lists are gone
+    Bypassed,
+    /// a route waits for the script it runs to be the fleet's
+    Unscripted(String),
+    /// a route waits for the script that lists it, whose write failed
+    Unlisted(String),
 }
 
 impl Withhold {
     /// whether this is the normal course of a rollout, rather than something
     /// a person should look at
     pub fn holds(&self) -> bool {
-        matches!(self, Withhold::Fleet(_) | Withhold::Retiring { .. })
+        matches!(
+            self,
+            Withhold::Fleet(_)
+                | Withhold::Retiring { .. }
+                | Withhold::Bypassed
+                | Withhold::Unscripted(_)
+                | Withhold::Unlisted(_)
+        )
     }
 
     pub fn explain(&self) -> String {
@@ -332,6 +359,15 @@ impl Withhold {
                 deletes: Deletes::UpTo(rolled_out),
             } => format!(
                 "it is deleted once the whole fleet runs t={dropped}, the configuration that dropped it; the fleet runs t={rolled_out}"
+            ),
+            Withhold::Bypassed => {
+                "it lists a bypass that is still there, and once it is gone nothing says that bypass is the fleet's, so it is deleted in the run after its bypasses are".into()
+            }
+            Withhold::Unscripted(script) => format!(
+                "it runs {script}, which is not the fleet's yet; it waits for that script"
+            ),
+            Withhold::Unlisted(script) => format!(
+                "{script} lists it in its tags, and writing them failed, so it waits for the next run"
             ),
         }
     }
@@ -366,6 +402,17 @@ impl<K: Kind> Plan<K> {
                 why: why.clone(),
             }),
         );
+    }
+
+    /// withholds the steps `why` names a reason for
+    pub fn withhold(&mut self, why: impl Fn(&Step<K>) -> Option<Withhold>) {
+        let steps = std::mem::take(&mut self.steps);
+        for step in steps {
+            match why(&step) {
+                Some(why) => self.withheld.push(Withheld { step, why }),
+                None => self.steps.push(step),
+            }
+        }
     }
 
     /// whether this plan writes, withholds or keeps the object

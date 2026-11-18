@@ -105,7 +105,7 @@ fn two_revisions_settle_on_the_newer_and_never_flip_back() {
     assert_eq!(
         lines(&old),
         [format!(
-            "held: update dns record example.com: fleet CNAME  coeus.example.com new.example.net  dns only -> old.example.net  dns only: a shared record carries t={NEW}, newer than this configuration, whose machines write the shared records"
+            "held: update dns record example.com: fleet CNAME  coeus.example.com new.example.net  dns only -> old.example.net  dns only: a shared object carries t={NEW}, newer than this configuration, whose machines write the shared objects"
         )]
     );
 }
@@ -238,7 +238,7 @@ fn a_held_fleet_says_why_a_retiring_record_waits_and_never_to_delete_it_by_hand(
         (uncommitted, "built from an uncommitted tree".to_owned()),
         (unknown, "the fleet's rollout is unknown: ".to_owned()),
         (behind, format!("the fleet has rolled out t={NEWER}")),
-        (older, format!("a shared record carries t={NEW}")),
+        (older, format!("a shared object carries t={NEW}")),
     ];
     let retiring = wire("A", "vpn.example.com", "192.0.2.50").retiring(NEW);
     for (machine, why) in cases {
@@ -265,7 +265,7 @@ fn a_held_fleet_says_why_a_retiring_record_waits_and_never_to_delete_it_by_hand(
         .collect();
     assert!(
         matches!(held.as_slice(), [line] if line.starts_with("held: delete ")
-            && line.ends_with("a zone could not be read, so a newer configuration's shared records may be there unseen")),
+            && line.ends_with("a scope could not be read, so a newer configuration's shared objects may be there unseen")),
         "{held:#?}"
     );
 }
@@ -484,7 +484,7 @@ fn an_unread_zone_holds_the_fleet_in_every_zone() {
     assert_eq!(held.len(), 2);
     assert!(
         held.iter()
-            .all(|line| line.ends_with("a zone could not be read, so a newer configuration's shared records may be there unseen")),
+            .all(|line| line.ends_with("a scope could not be read, so a newer configuration's shared objects may be there unseen")),
         "{held:#?}"
     );
 }
@@ -524,14 +524,14 @@ fn a_report_says_once_whether_the_fleet_scope_writes() {
     assert_eq!(
         gate(&machine),
         [format!(
-            "fleet scope: write at t={NEW}; with no rollout file, no retiring record is deleted"
+            "fleet scope: write at t={NEW}; with no rollout file, no retiring object is deleted"
         )]
     );
     machine.rolled_out(OLD, FRESH);
     assert_eq!(
         gate(&machine),
         [format!(
-            "fleet scope: write at t={NEW}; retiring records stamped up to t={OLD} are deleted"
+            "fleet scope: write at t={NEW}; retiring objects stamped up to t={OLD} are deleted"
         )]
     );
     machine.rolled_out(NEWER, FRESH);

@@ -135,7 +135,8 @@ pub(crate) fn plan<K: Kind>(
                 })
                 .collect();
             let twin = same.iter().copied().find(|&index| {
-                live[index].ownership == (Ownership::Unmarked { annotated: false })
+                K::ADOPTS
+                    && live[index].ownership == (Ownership::Unmarked { annotated: false })
                     && live[index].value.as_ref() == Some(&want)
             });
             if let Some(index) = twin {
@@ -151,6 +152,7 @@ pub(crate) fn plan<K: Kind>(
                 continue;
             };
             let why = match &live[index].ownership {
+                Ownership::Unmarked { .. } if !K::ADOPTS => Why::Taken,
                 Ownership::Unmarked { annotated: true }
                     if live[index].value.as_ref() == Some(&want) =>
                 {
@@ -223,8 +225,9 @@ pub(crate) fn plan<K: Kind>(
             Fate::Retiring => (index, Why::Retiring),
             _ => (index, Why::Excludes),
         };
+        let occupied = if K::ADOPTS { Why::Occupied } else { Why::Taken };
         occupant
-            .map(|index| (index, Why::Occupied))
+            .map(|index| (index, occupied.clone()))
             .or(excluder.map(excludes))
     };
 
