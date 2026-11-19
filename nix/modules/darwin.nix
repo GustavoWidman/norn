@@ -20,6 +20,12 @@ in
       ++ [
         "--token-file"
         cfg.tokenFile
+      ]
+      ++ lib.optionals cfg.push.enable [
+        "--push-vapid-key-file"
+        cfg.push.vapidKeyFile
+        "--push-subscriptions-file"
+        cfg.push.subscriptionsFile
       ];
       RunAtLoad = true;
       StartInterval = cfg.interval;

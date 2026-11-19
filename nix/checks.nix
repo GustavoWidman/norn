@@ -89,6 +89,16 @@ let
     };
   };
 
+  pushing = {
+    services.norn.push = {
+      enable = true;
+      vapidKeyFile = "/run/agenix/push-vapid";
+      subscriptionsFile = "/run/agenix/push-subscriptions";
+      subject = "https://fleet.example.com";
+      navigate = "https://fleet.example.com/machines/{host}";
+    };
+  };
+
   cases = {
     clean = {
       fleet = {
@@ -123,6 +133,29 @@ let
       };
       expect = [
         "norn: app.example.org CNAME shares its name with app.example.org TXT; a CNAME shares its name with nothing."
+      ];
+    };
+    push-clean = {
+      fleet.web-1 = with' [
+        web-1
+        pushing
+      ];
+      expect = [ ];
+    };
+    push-elsewhere = {
+      fleet.web-1 = with' [
+        web-1
+        pushing
+        {
+          services.norn.push = {
+            subject = lib.mkForce "fleet.example.com";
+            navigate = lib.mkForce "http://fleet.example.com/machines/{host}";
+          };
+        }
+      ];
+      expect = [
+        "norn: services.norn.push.navigate is http://fleet.example.com/machines/{host}; a notice opens an https: URL."
+        "norn: services.norn.push.subject is fleet.example.com; a VAPID subject is an https: URL or a mailto: address."
       ];
     };
     fleet-clean = {
@@ -264,6 +297,13 @@ let
         }
       ];
     }).web-1.config;
+  pushed =
+    (fleet {
+      web-1 = with' [
+        web-1
+        pushing
+      ];
+    }).web-1.config;
   broken =
     (fleet {
       web-1 = with' [
@@ -309,6 +349,8 @@ in
     grep -q '"revision": null' ${(machine "web-1").services.norn.desired}
     ${lib.optionalString (!lib.hasInfix "--rollout /var/lib/fleet/rollout.json --rollout-max-age 1800s" (toString sharing.services.norn.arguments)) "false"}
     ${lib.optionalString (lib.hasInfix "--rollout" (toString (machine "web-1").services.norn.arguments)) "false"}
+    ${lib.optionalString (!lib.hasInfix "--push-subject https://fleet.example.com --push-navigate https://fleet.example.com/machines/{host} --push-after 1800s" (toString pushed.services.norn.arguments)) "false"}
+    ${lib.optionalString (lib.hasInfix "--push" (toString (machine "web-1").services.norn.arguments)) "false"}
     touch "$out"
   '';
 
