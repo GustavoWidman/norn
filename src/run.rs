@@ -18,6 +18,7 @@ use crate::{
     kind::{Kind, Ladder, Live, Mark, Ownership, Plan, Reading, Sent, Step, Want, Withhold},
     model::{Owner, Revision},
     plan::plan,
+    push::PushSettings,
     workers::{self, Owners, Pattern, Routes, ScriptName, Scripts},
 };
 
@@ -75,6 +76,9 @@ impl Cloudflare {
 /// activation never fails because of cloudflare; the status file says what
 /// did not apply.
 ///
+/// with `push`, the owner's devices hear when runs stay troubled and when
+/// they recover, within the watchdog too.
+///
 /// the one error is a caller that does not own `state_dir`, which is
 /// refused before the run starts.
 pub fn converge(
@@ -84,6 +88,7 @@ pub fn converge(
     timing: Timing,
     max_deletes: usize,
     rollout: Option<&RolloutFile>,
+    push: Option<&PushSettings>,
 ) -> eyre::Result<()> {
     owner_only(state_dir, rustix::process::geteuid().as_raw())?;
     let crash_dir = state_dir.to_owned();
@@ -99,7 +104,7 @@ pub fn converge(
         std::process::exit(0);
     }));
     let watchdog_dir = state_dir.to_owned();
-    let after = timing.watchdog();
+    let after = timing.watchdog() + push.map_or(Duration::ZERO, |_| crate::push::DEADLINE);
     thread::spawn(move || {
         thread::sleep(after);
         let message =
@@ -119,6 +124,7 @@ pub fn converge(
         timing,
         max_deletes,
         rollout,
+        push,
     );
     Ok(())
 }
@@ -145,6 +151,7 @@ pub(crate) fn owner_only(state_dir: &Path, caller: u32) -> eyre::Result<()> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn converge_with(
     cloudflare: &Cloudflare,
     desired_path: &Path,
@@ -153,19 +160,26 @@ pub(crate) fn converge_with(
     timing: Timing,
     max_deletes: usize,
     rollout: Option<&RolloutFile>,
+    push: Option<&PushSettings>,
 ) -> crate::status::Health {
-    let summary = 'run: {
+    // a notice goes out under the lock, so two runs never both send it
+    let (summary, _lock, host) = 'run: {
         let desired = match Desired::read(desired_path) {
             Ok(desired) => desired,
             Err(problems) => {
                 log::error!("{problems}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    problems.to_string(),
+                break 'run (
+                    crate::status::Summary::problem(
+                        crate::status::Health::Failing,
+                        problems.to_string(),
+                    ),
+                    None,
+                    None,
                 );
             }
         };
-        let _lock = match Lock::acquire(state_dir, timing.lock_wait) {
+        let host = Some(desired.host.to_string());
+        let lock = match Lock::acquire(state_dir, timing.lock_wait) {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 log::warn!(
@@ -176,9 +190,13 @@ pub(crate) fn converge_with(
             }
             Err(error) => {
                 log::error!("{error:#}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    format!("{error:#}"),
+                break 'run (
+                    crate::status::Summary::problem(
+                        crate::status::Health::Failing,
+                        format!("{error:#}"),
+                    ),
+                    None,
+                    host,
                 );
             }
         };
@@ -187,19 +205,24 @@ pub(crate) fn converge_with(
             None | Some(Err(TokenError::Missing | TokenError::Empty)) => {
                 let message = "no cloudflare token yet; skipping this run".to_owned();
                 log::warn!("{message}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Skipped,
-                    message,
-                )
-                .desired(desired_path, desired.mode);
+                break 'run (
+                    crate::status::Summary::problem(crate::status::Health::Skipped, message)
+                        .desired(desired_path, desired.mode),
+                    Some(lock),
+                    host,
+                );
             }
             Some(Err(error)) => {
                 log::error!("{error}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    error.to_string(),
-                )
-                .desired(desired_path, desired.mode);
+                break 'run (
+                    crate::status::Summary::problem(
+                        crate::status::Health::Failing,
+                        error.to_string(),
+                    )
+                    .desired(desired_path, desired.mode),
+                    Some(lock),
+                    host,
+                );
             }
         };
 
@@ -236,10 +259,19 @@ pub(crate) fn converge_with(
             started.elapsed(),
             summary.counts
         );
-        summary
+        (summary, Some(lock), host)
     };
     let health = summary.health;
-    crate::status::record(state_dir, &summary);
+    let (previous, current) = crate::status::record(state_dir, &summary);
+    if let Some(push) = push {
+        let host = host.unwrap_or_else(|| {
+            rustix::system::uname()
+                .nodename()
+                .to_string_lossy()
+                .into_owned()
+        });
+        crate::push::announce(state_dir, previous.as_ref(), current, push, &host);
+    }
     health
 }
 

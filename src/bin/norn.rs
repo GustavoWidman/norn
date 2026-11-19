@@ -50,6 +50,47 @@ impl Run {
     }
 }
 
+/// Web Push notices to the owner's devices: one when runs have stayed
+/// troubled for --push-after, and one when that ends
+#[derive(clap::Args)]
+struct Push {
+    /// the VAPID private key: the base64url of a P-256 scalar
+    #[arg(
+        long,
+        env = "NORN_PUSH_VAPID_KEY_FILE",
+        requires_all = ["push_subscriptions_file", "push_subject", "push_navigate"]
+    )]
+    push_vapid_key_file: Option<PathBuf>,
+    /// a JSON array of `PushSubscription.toJSON()` objects, each with a name
+    #[arg(
+        long,
+        env = "NORN_PUSH_SUBSCRIPTIONS_FILE",
+        requires = "push_vapid_key_file"
+    )]
+    push_subscriptions_file: Option<PathBuf>,
+    /// the VAPID subject: an https URL or a mailto:
+    #[arg(long, env = "NORN_PUSH_SUBJECT", requires = "push_vapid_key_file")]
+    push_subject: Option<String>,
+    /// the https URL a tap on a notice opens; {host} stands for this machine
+    #[arg(long, env = "NORN_PUSH_NAVIGATE", requires = "push_vapid_key_file")]
+    push_navigate: Option<String>,
+    /// how long runs stay troubled before the devices hear of it
+    #[arg(long, env = "NORN_PUSH_AFTER", default_value = "30m")]
+    push_after: humantime::Duration,
+}
+
+impl Push {
+    fn settings(self) -> Option<norn::PushSettings> {
+        Some(norn::PushSettings {
+            vapid_key_file: self.push_vapid_key_file?,
+            subscriptions_file: self.push_subscriptions_file?,
+            subject: self.push_subject?,
+            navigate: self.push_navigate?,
+            after: self.push_after.into(),
+        })
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// act in the desired file's mode; the service runs this, and every run exits 0.
@@ -62,6 +103,8 @@ enum Command {
         /// how long to wait for another run of this machine
         #[arg(long, default_value = "10s")]
         lock_wait: humantime::Duration,
+        #[command(flatten)]
+        push: Push,
     },
     /// print what a run would do; it holds no client that can write
     Report {
@@ -114,6 +157,7 @@ fn main() -> ExitCode {
             run,
             state_dir,
             lock_wait,
+            push,
         } => {
             let timing = timing(&run, lock_wait.into());
             match norn::converge(
@@ -123,6 +167,7 @@ fn main() -> ExitCode {
                 timing,
                 run.max_deletes,
                 run.rollout().as_ref(),
+                push.settings().as_ref(),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
