@@ -436,6 +436,67 @@ next sweep. a missing or empty token file skips the run, which counts as
 trouble if it keeps happening. that covers a secret not decrypted on this
 machine yet: the unit still exits 0, so it never holds up a deploy.
 
+## push notices
+
+a failing norn is quiet by design, since a run never fails a deploy. to
+hear about it anyway, norn can send web push notices straight to your
+phone or desktop browser:
+
+```nix
+services.norn.push = {
+  enable = true;
+  vapidKeyFile = config.age.secrets.push-vapid.path;
+  subscriptionsFile = config.age.secrets.push-subscriptions.path;
+  subject = "https://fleet.example.com"; # the vapid subject
+  navigate = "https://fleet.example.com/machines/{host}"; # what a tap opens
+};
+```
+
+it says two things, and only two. once runs have stayed troubled for 30
+minutes (`services.norn.push.after`), which is when `norn status` starts
+exiting 1, it sends one notice. when that streak ends, it sends one more.
+one bad run, a cloudflare blip, says nothing. a fault that lasts a week is
+still one notice, and a streak that turns from blocked to failing doesn't
+start a new one:
+
+```text
+norn failing on web-1                                  (urgency high)
+unread: dns record example.com: cloudflare refused it (403): 1000 Invalid API Token (+2 more)
+troubled for 30m
+
+norn recovered on web-1                                ← replaces the one above
+converged after 45m troubled
+```
+
+`status.json` keeps `notifiedAt`, so the once survives restarts: it's set
+when the trouble notice reaches a device and cleared when the recovery
+does. a notice no device took, because the push service was busy or out of
+reach, goes out again with the next run. a subscription the push service
+says is gone counts as told, and the journal says to remove it.
+
+the vapid key file holds the base64url of a p-256 private scalar. the
+subscriptions file is a json array of what the browser's
+`PushSubscription.toJSON()` gives, each with a `name` that the logs print
+in its place, since an endpoint is as good as a password:
+
+```json
+[
+  {
+    "name": "phone",
+    "endpoint": "https://web.push.apple.com/QGx…",
+    "keys": { "p256dh": "BNc…", "auth": "q1d…" }
+  }
+]
+```
+
+both files are read at every send, so adding a device takes a deploy and
+no restart. on nixos they reach the units as credentials, like the token,
+and a missing one only gets logged. notices are declarative web push
+messages, which safari shows by itself, tagged `norn/<host>` so a recovery
+replaces the trouble on the lock screen. sending takes at most 10 seconds
+of the run, and nothing about it changes the run's outcome. norn sends
+them with [gjallar](https://crates.io/crates/gjallar).
+
 ## commands
 
 the module puts `norn` on the path, already pointed at the machine's own
@@ -527,7 +588,9 @@ a few things norn deliberately leaves to you:
   upload.
 - **a failing norn is quiet.** runs always exit 0, so nothing shows up in
   `systemctl --failed`. `sudo norn status` is where to look: it exits 1 once
-  runs have been troubled, or silent, for 30 minutes.
+  runs have been troubled, or silent, for 30 minutes. [push
+  notices](#push-notices) say the same out loud, except for silence: a
+  machine that stopped running norn has nobody left to send them.
 
 ## file structure
 
@@ -539,6 +602,7 @@ a few things norn deliberately leaves to you:
 │   ├── package.nix    # the crane build, with the tests and clippy as checks
 │   ├── checks.nix     # the module's assertions, over small fake fleets
 │   ├── test.nix       # the nixos units, booted in a vm
+│   ├── fake-push.py   # a push service for the vm test, that decrypts
 │   └── modules/
 │       ├── common.nix # cloudflare.* and services.norn, for both platforms
 │       ├── nixos.nix  # norn.service and the sweep timer
@@ -556,6 +620,7 @@ a few things norn deliberately leaves to you:
     ├── model.rs       # host names, owners, revisions, domain names and zones
     ├── report.rs      # the printed plan
     ├── status.rs      # status.json
+    ├── push.rs        # the notices: when runs stay troubled, and when they recover
     └── test/          # an in-memory cloudflare, and the tests that use it
 ```
 
