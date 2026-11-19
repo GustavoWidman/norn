@@ -168,24 +168,12 @@ impl Summary {
 
 pub(crate) fn record(state_dir: &Path, summary: &Summary) {
     let previous = read(state_dir).ok();
-    let now = Utc::now();
-    let troubled_since = summary.health.troubled().then(|| {
-        previous
-            .as_ref()
-            .filter(|previous| previous.health.troubled())
-            .and_then(|previous| previous.troubled_since)
-            .unwrap_or(now)
-    });
-    let status = Status {
-        finished: now,
-        desired: summary.desired.clone(),
-        mode: summary.mode.map(str::to_owned),
-        health: summary.health,
-        counts: summary.counts,
-        troubled_since,
-        lines: summary.lines.clone(),
-    };
-    if let Err(error) = write(state_dir, &status) {
+    let status = Status::following(previous.as_ref(), summary, Utc::now());
+    save(state_dir, &status);
+}
+
+fn save(state_dir: &Path, status: &Status) {
+    if let Err(error) = write(state_dir, status) {
         log::error!(
             "cannot record the run's status in {}: {error:#}",
             state_dir.display()
@@ -208,6 +196,26 @@ pub(crate) fn read(state_dir: &Path) -> eyre::Result<Status> {
 }
 
 impl Status {
+    /// the status of a run that ended `now`. a troubled run keeps the
+    /// streak's start from a troubled run before it
+    pub fn following(previous: Option<&Status>, summary: &Summary, now: DateTime<Utc>) -> Self {
+        let troubled_since = summary.health.troubled().then(|| {
+            previous
+                .filter(|previous| previous.health.troubled())
+                .and_then(|previous| previous.troubled_since)
+                .unwrap_or(now)
+        });
+        Status {
+            finished: now,
+            desired: summary.desired.clone(),
+            mode: summary.mode.map(str::to_owned),
+            health: summary.health,
+            counts: summary.counts,
+            troubled_since,
+            lines: summary.lines.clone(),
+        }
+    }
+
     pub fn fresh(&self, now: DateTime<Utc>, stale: Duration) -> bool {
         let older = |at: DateTime<Utc>| (now - at).to_std().is_ok_and(|age| age > stale);
         !older(self.finished) && !self.troubled_since.is_some_and(older)
