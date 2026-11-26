@@ -14,8 +14,8 @@ use crate::{
     gate::RolloutFile,
     kind::{Ladder, Want},
     model::{HostName, Owner, Revision, Zones},
-    run::{Cloudflare, Lock, Timing, converge_with, owner_only, report_with},
-    status::{self, Health},
+    run::{Cloudflare, Lock, Timing, converge_with, give_up, owner_only, report_with},
+    status::{self, Health, Store},
     workers::{Account, CompatibilityDate, Pattern, ScriptName},
 };
 
@@ -126,6 +126,18 @@ impl Machine {
         self.dir.path().join("state")
     }
 
+    /// in a directory no run has made yet
+    pub fn metrics(&self) -> PathBuf {
+        self.dir.path().join("metrics/norn.prom")
+    }
+
+    pub fn store(&self) -> Store {
+        Store {
+            state_dir: self.state(),
+            metrics: Some(self.metrics()),
+        }
+    }
+
     fn token(&self) -> PathBuf {
         self.dir.path().join("token")
     }
@@ -151,7 +163,7 @@ impl Machine {
             &Cloudflare::Fake(fake.clone()),
             &desired,
             Some(&self.token()),
-            &self.state(),
+            &self.store(),
             timing(),
             max_deletes,
             self.rollout.as_ref(),
@@ -420,7 +432,7 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
             &Cloudflare::Fake(fake.clone()),
             &desired,
             Some(&one.token()),
-            &one.state(),
+            &one.store(),
             spent,
             MAX_DELETES,
             None,
@@ -463,6 +475,130 @@ fn a_machine_is_fresh_until_it_has_been_troubled_or_silent_past_stale() {
     assert!(!status.fresh(after(21), stale));
 }
 
+fn textfile(healthy_at: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "# HELP norn_healthy_timestamp_seconds When norn was last known healthy on this machine: the start of its troubled streak, or else the end of its last run.
+# TYPE norn_healthy_timestamp_seconds gauge
+norn_healthy_timestamp_seconds {}
+",
+        healthy_at.timestamp()
+    )
+}
+
+fn metrics(machine: &Machine) -> String {
+    std::fs::read_to_string(machine.metrics()).unwrap()
+}
+
+/// rewrites the last run's status as if its troubled streak began `ago`
+fn troubled_for(machine: &Machine, ago: chrono::TimeDelta) -> chrono::DateTime<chrono::Utc> {
+    let path = machine.state().join("status.json");
+    let mut status: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let since = chrono::Utc::now() - ago;
+    status["troubledSince"] = json!(since);
+    std::fs::write(&path, status.to_string()).unwrap();
+    since
+}
+
+#[test]
+fn a_converged_run_writes_when_it_finished_as_the_textfile() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Converged);
+    let status = status::read(&one.state()).unwrap();
+    assert_eq!(metrics(&one), textfile(status.finished));
+    let mode = std::fs::metadata(one.metrics()).unwrap().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+    let left: Vec<_> = std::fs::read_dir(one.metrics().parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["norn.prom"]);
+}
+
+#[test]
+fn a_troubled_streak_holds_the_textfile_at_its_start() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Converged);
+    std::fs::write(one.token(), "\n").unwrap();
+
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Skipped);
+    let first = status::read(&one.state()).unwrap();
+    assert_eq!(first.troubled_since, Some(first.finished));
+    assert_eq!(metrics(&one), textfile(first.finished));
+
+    let since = troubled_for(&one, chrono::TimeDelta::hours(1));
+    for _ in 0..2 {
+        assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Skipped);
+        assert_eq!(metrics(&one), textfile(since));
+    }
+    let troubled = status::read(&one.state()).unwrap();
+    assert_eq!(troubled.healthy_at(), since);
+    assert!(!troubled.fresh(troubled.finished, Duration::from_secs(30 * 60)));
+
+    std::fs::write(one.token(), "test-token\n").unwrap();
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Converged);
+    let recovered = status::read(&one.state()).unwrap();
+    assert_eq!(metrics(&one), textfile(recovered.finished));
+}
+
+#[test]
+fn the_watchdog_writes_the_textfile_too() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Converged);
+    give_up(&one.store(), Duration::from_secs(45));
+    let status = status::read(&one.state()).unwrap();
+    assert_eq!(status.health, Health::Failing);
+    assert_eq!(
+        status.lines,
+        ["gave up after 45s; what did not apply is retried by the next run"]
+    );
+    assert_eq!(status.troubled_since, Some(status.finished));
+    assert_eq!(metrics(&one), textfile(status.finished));
+}
+
+#[test]
+fn a_run_without_a_textfile_writes_none() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    let desired = one.declare(ADOPT, web_1().into());
+    let store = Store {
+        state_dir: one.state(),
+        metrics: None,
+    };
+    let health = converge_with(
+        &Cloudflare::Fake(fake.clone()),
+        &desired,
+        Some(&one.token()),
+        &store,
+        timing(),
+        MAX_DELETES,
+        None,
+    );
+    assert_eq!(health, Health::Converged);
+    assert!(!one.metrics().parent().unwrap().exists());
+}
+
+#[test]
+fn a_status_file_with_fields_norn_no_longer_keeps_still_reads() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    std::fs::write(one.token(), "\n").unwrap();
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Skipped);
+    let path = one.state().join("status.json");
+    let mut status: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    status["notifiedAt"] = status["finished"].clone();
+    std::fs::write(&path, status.to_string()).unwrap();
+
+    let read = status::read(&one.state()).unwrap();
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Skipped);
+    let next = status::read(&one.state()).unwrap();
+    assert_eq!(next.troubled_since, read.troubled_since);
+}
+
 #[test]
 fn a_missing_token_skips_the_run() {
     let fake = cloudflare();
@@ -473,7 +609,7 @@ fn a_missing_token_skips_the_run() {
         &Cloudflare::Fake(fake.clone()),
         &desired,
         Some(&missing),
-        &one.state(),
+        &one.store(),
         timing(),
         MAX_DELETES,
         None,
@@ -497,7 +633,7 @@ fn an_empty_token_skips_the_run() {
         &Cloudflare::Fake(fake.clone()),
         &desired,
         Some(&one.token()),
-        &one.state(),
+        &one.store(),
         timing(),
         MAX_DELETES,
         None,
@@ -523,7 +659,7 @@ fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
         &Cloudflare::Fake(fake.clone()),
         &desired,
         Some(&one.token()),
-        &one.state(),
+        &one.store(),
         waiting,
         MAX_DELETES,
         None,
@@ -540,7 +676,7 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
         &Cloudflare::Fake(cloudflare()),
         desired,
         Some(&one.token()),
-        &one.state(),
+        &one.store(),
         timing(),
         MAX_DELETES,
         None,

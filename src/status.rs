@@ -1,4 +1,9 @@
-use std::{fmt, path::Path, time::Duration};
+use std::{
+    fmt,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use eyre::WrapErr;
@@ -10,6 +15,8 @@ use crate::{
 };
 
 const LINES: usize = 20;
+
+const HEALTHY: &str = "norn_healthy_timestamp_seconds";
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -166,26 +173,53 @@ impl Summary {
     }
 }
 
-pub(crate) fn record(state_dir: &Path, summary: &Summary) {
-    let previous = read(state_dir).ok();
-    let status = Status::following(previous.as_ref(), summary, Utc::now());
-    save(state_dir, &status);
+/// where a run's outcome goes: `status.json` in the state directory and,
+/// with `metrics`, a prometheus textfile of when this machine was last
+/// known healthy
+#[derive(Clone)]
+pub(crate) struct Store {
+    pub state_dir: PathBuf,
+    pub metrics: Option<PathBuf>,
 }
 
-fn save(state_dir: &Path, status: &Status) {
-    if let Err(error) = write(state_dir, status) {
-        log::error!(
-            "cannot record the run's status in {}: {error:#}",
-            state_dir.display()
-        );
+impl Store {
+    pub fn record(&self, summary: &Summary) {
+        let previous = read(&self.state_dir).ok();
+        let status = Status::following(previous.as_ref(), summary, Utc::now());
+        let written = serde_json::to_vec_pretty(&status)
+            .map_err(eyre::Report::from)
+            .and_then(|json| replace(&self.state_dir.join("status.json"), &json));
+        if let Err(error) = written {
+            log::error!(
+                "cannot record the run's status in {}: {error:#}",
+                self.state_dir.display()
+            );
+        }
+        if let Some(path) = &self.metrics
+            && let Err(error) = replace(path, status.metrics().as_bytes())
+        {
+            log::error!("cannot write {}: {error:#}", path.display());
+        }
     }
 }
 
-fn write(state_dir: &Path, status: &Status) -> eyre::Result<()> {
-    std::fs::create_dir_all(state_dir)?;
-    let partial = state_dir.join("status.json.partial");
-    std::fs::write(&partial, serde_json::to_vec_pretty(status)?)?;
-    std::fs::rename(&partial, state_dir.join("status.json"))?;
+/// writes `path` whole or not at all, readable by everyone: a reader sees
+/// the old file or the new one
+fn replace(path: &Path, bytes: &[u8]) -> eyre::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    // one left by a run under another uid cannot be opened, only removed
+    match std::fs::remove_file(&partial) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    std::fs::write(&partial, bytes)?;
+    std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&partial, path)?;
     Ok(())
 }
 
@@ -227,6 +261,16 @@ impl Status {
         !(now - self.healthy_at())
             .to_std()
             .is_ok_and(|age| age > stale)
+    }
+
+    /// the prometheus textfile node exporter's textfile collector serves
+    pub fn metrics(&self) -> String {
+        format!(
+            "# HELP {HEALTHY} When norn was last known healthy on this machine: the start of its troubled streak, or else the end of its last run.\n\
+             # TYPE {HEALTHY} gauge\n\
+             {HEALTHY} {}\n",
+            self.healthy_at().timestamp()
+        )
     }
 
     pub fn describe(&self) -> String {

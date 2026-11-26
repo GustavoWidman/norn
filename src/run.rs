@@ -18,6 +18,7 @@ use crate::{
     kind::{Kind, Ladder, Live, Mark, Ownership, Plan, Reading, Sent, Step, Want, Withhold},
     model::{Owner, Revision},
     plan::plan,
+    status::{Health, Store, Summary},
     workers::{self, Owners, Pattern, Routes, ScriptName, Scripts},
 };
 
@@ -67,7 +68,9 @@ impl Cloudflare {
 }
 
 /// the service's entry. brings this machine's objects in line in the
-/// configured mode and records the outcome in `state_dir/status.json`.
+/// configured mode and records the outcome in `state_dir/status.json`, and
+/// with `metrics`, when the machine was last known healthy in that
+/// prometheus textfile.
 ///
 /// it returns within the run's watchdog, and the process exits 0 whatever
 /// happened: an unreadable desired file, a missing token, a cloudflare
@@ -81,46 +84,49 @@ pub fn converge(
     desired: &Path,
     token_file: Option<&Path>,
     state_dir: &Path,
+    metrics: Option<&Path>,
     timing: Timing,
     max_deletes: usize,
     rollout: Option<&RolloutFile>,
 ) -> eyre::Result<()> {
     owner_only(state_dir, rustix::process::geteuid().as_raw())?;
-    let crash_dir = state_dir.to_owned();
+    let store = Store {
+        state_dir: state_dir.to_owned(),
+        metrics: metrics.map(Path::to_owned),
+    };
+    let crashed = store.clone();
     std::panic::set_hook(Box::new(move |panic| {
         log::error!("norn crashed: {panic}");
-        crate::status::record(
-            &crash_dir,
-            &crate::status::Summary::problem(
-                crate::status::Health::Failing,
-                format!("crashed: {panic}"),
-            ),
-        );
+        crashed.record(&Summary::problem(
+            Health::Failing,
+            format!("crashed: {panic}"),
+        ));
         std::process::exit(0);
     }));
-    let watchdog_dir = state_dir.to_owned();
+    let watched = store.clone();
     let after = timing.watchdog();
     thread::spawn(move || {
         thread::sleep(after);
-        let message =
-            format!("gave up after {after:?}; what did not apply is retried by the next run");
-        log::error!("{message}");
-        crate::status::record(
-            &watchdog_dir,
-            &crate::status::Summary::problem(crate::status::Health::Failing, message),
-        );
+        give_up(&watched, after);
         std::process::exit(0);
     });
     converge_with(
         &Cloudflare::Https,
         desired,
         token_file,
-        state_dir,
+        &store,
         timing,
         max_deletes,
         rollout,
     );
     Ok(())
+}
+
+/// what the watchdog records of a run still going after `after`
+pub(crate) fn give_up(store: &Store, after: Duration) {
+    let message = format!("gave up after {after:?}; what did not apply is retried by the next run");
+    log::error!("{message}");
+    store.record(&Summary::problem(Health::Failing, message));
 }
 
 pub(crate) fn owner_only(state_dir: &Path, caller: u32) -> eyre::Result<()> {
@@ -149,37 +155,31 @@ pub(crate) fn converge_with(
     cloudflare: &Cloudflare,
     desired_path: &Path,
     token_file: Option<&Path>,
-    state_dir: &Path,
+    store: &Store,
     timing: Timing,
     max_deletes: usize,
     rollout: Option<&RolloutFile>,
-) -> crate::status::Health {
+) -> Health {
     let summary = 'run: {
         let desired = match Desired::read(desired_path) {
             Ok(desired) => desired,
             Err(problems) => {
                 log::error!("{problems}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    problems.to_string(),
-                );
+                break 'run Summary::problem(Health::Failing, problems.to_string());
             }
         };
-        let _lock = match Lock::acquire(state_dir, timing.lock_wait) {
+        let _lock = match Lock::acquire(&store.state_dir, timing.lock_wait) {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 log::warn!(
                     "another norn run held the lock for {:?}; the next run does this one's work",
                     timing.lock_wait
                 );
-                return crate::status::Health::Skipped;
+                return Health::Skipped;
             }
             Err(error) => {
                 log::error!("{error:#}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    format!("{error:#}"),
-                );
+                break 'run Summary::problem(Health::Failing, format!("{error:#}"));
             }
         };
         let token = match token_file.map(Token::read) {
@@ -187,19 +187,13 @@ pub(crate) fn converge_with(
             None | Some(Err(TokenError::Missing | TokenError::Empty)) => {
                 let message = "no cloudflare token yet; skipping this run".to_owned();
                 log::warn!("{message}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Skipped,
-                    message,
-                )
-                .desired(desired_path, desired.mode);
+                break 'run Summary::problem(Health::Skipped, message)
+                    .desired(desired_path, desired.mode);
             }
             Some(Err(error)) => {
                 log::error!("{error}");
-                break 'run crate::status::Summary::problem(
-                    crate::status::Health::Failing,
-                    error.to_string(),
-                )
-                .desired(desired_path, desired.mode);
+                break 'run Summary::problem(Health::Failing, error.to_string())
+                    .desired(desired_path, desired.mode);
             }
         };
 
@@ -229,7 +223,7 @@ pub(crate) fn converge_with(
         for line in &lines {
             line.log();
         }
-        let summary = crate::status::Summary::of(&lines).desired(desired_path, desired.mode);
+        let summary = Summary::of(&lines).desired(desired_path, desired.mode);
         log::info!(
             "{} in {:.1?} ({})",
             summary.health.as_str(),
@@ -239,7 +233,7 @@ pub(crate) fn converge_with(
         summary
     };
     let health = summary.health;
-    crate::status::record(state_dir, &summary);
+    store.record(&summary);
     health
 }
 
