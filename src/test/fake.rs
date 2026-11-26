@@ -26,8 +26,6 @@ struct State {
     routes: BTreeMap<String, Vec<Value>>,
     /// zone ids whose routes the token may not touch
     forbidden: BTreeSet<String>,
-    /// the token was revoked: every request answers 403
-    revoked: bool,
     requests: Vec<String>,
     serial: u64,
 }
@@ -113,11 +111,6 @@ impl Cloudflare {
         let mut state = self.state.lock().unwrap();
         let id = state.zone_id(zone);
         state.forbidden.insert(id);
-    }
-
-    /// revokes the token, or with false, issues it again
-    pub fn revoke(&self, revoked: bool) {
-        self.state.lock().unwrap().revoked = revoked;
     }
 
     pub fn scripts(&self, account: &str) -> BTreeMap<String, Script> {
@@ -246,9 +239,6 @@ impl Fetch for Cloudflare {
         state
             .requests
             .push(format!("GET {path}?{}", shown.join("&")));
-        if state.revoked {
-            return refused(403, 1000, "Invalid API Token");
-        }
         let arg = |key: &str| {
             query
                 .iter()

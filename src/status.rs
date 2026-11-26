@@ -20,10 +20,6 @@ pub(crate) struct Status {
     pub health: Health,
     pub counts: Counts,
     pub troubled_since: Option<DateTime<Utc>>,
-    /// when the devices were told that runs stay troubled, until they hear
-    /// that it ended
-    #[serde(default)]
-    pub notified_at: Option<DateTime<Utc>>,
     pub lines: Vec<String>,
 }
 
@@ -48,7 +44,7 @@ impl Health {
         }
     }
 
-    pub fn troubled(self) -> bool {
+    fn troubled(self) -> bool {
         matches!(self, Health::Failing | Health::Blocked | Health::Skipped)
     }
 }
@@ -170,15 +166,13 @@ impl Summary {
     }
 }
 
-/// writes the run's status and returns it, with the one it follows
-pub(crate) fn record(state_dir: &Path, summary: &Summary) -> (Option<Status>, Status) {
+pub(crate) fn record(state_dir: &Path, summary: &Summary) {
     let previous = read(state_dir).ok();
     let status = Status::following(previous.as_ref(), summary, Utc::now());
     save(state_dir, &status);
-    (previous, status)
 }
 
-pub(crate) fn save(state_dir: &Path, status: &Status) {
+fn save(state_dir: &Path, status: &Status) {
     if let Err(error) = write(state_dir, status) {
         log::error!(
             "cannot record the run's status in {}: {error:#}",
@@ -203,8 +197,7 @@ pub(crate) fn read(state_dir: &Path) -> eyre::Result<Status> {
 
 impl Status {
     /// the status of a run that ended `now`. a troubled run keeps the
-    /// streak's start from a troubled run before it, and every run keeps
-    /// `notified_at` until a notice says otherwise
+    /// streak's start from a troubled run before it
     pub fn following(previous: Option<&Status>, summary: &Summary, now: DateTime<Utc>) -> Self {
         let troubled_since = summary.health.troubled().then(|| {
             previous
@@ -219,7 +212,6 @@ impl Status {
             health: summary.health,
             counts: summary.counts,
             troubled_since,
-            notified_at: previous.and_then(|previous| previous.notified_at),
             lines: summary.lines.clone(),
         }
     }
@@ -238,9 +230,6 @@ impl Status {
         );
         if let Some(since) = self.troubled_since {
             text.push_str(&format!("troubled since {}\n", since.to_rfc3339()));
-        }
-        if let Some(at) = self.notified_at {
-            text.push_str(&format!("notified at {}\n", at.to_rfc3339()));
         }
         text.push_str(&format!("{}\n", self.counts));
         for line in &self.lines {
