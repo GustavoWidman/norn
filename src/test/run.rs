@@ -445,6 +445,25 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
 }
 
 #[test]
+fn a_machine_is_fresh_until_it_has_been_troubled_or_silent_past_stale() {
+    let fake = cloudflare();
+    let one = Machine::new(WEB_1);
+    assert_eq!(one.converge(&fake, ADOPT, web_1()), Health::Converged);
+    let mut status = status::read(&one.state()).unwrap();
+    let stale = Duration::from_secs(30 * 60);
+    let after = |minutes| status.finished + chrono::TimeDelta::minutes(minutes);
+    assert!(status.fresh(after(29), stale));
+    assert!(!status.fresh(after(31), stale));
+
+    status.health = Health::Failing;
+    status.troubled_since = Some(after(-40));
+    assert!(!status.fresh(after(1), stale));
+    status.troubled_since = Some(after(-10));
+    assert!(status.fresh(after(1), stale));
+    assert!(!status.fresh(after(21), stale));
+}
+
+#[test]
 fn a_missing_token_skips_the_run() {
     let fake = cloudflare();
     let one = Machine::new(WEB_1);
