@@ -59,6 +59,10 @@ enum Command {
         run: Run,
         #[arg(long, env = "NORN_STATE_DIR", default_value = STATE)]
         state_dir: PathBuf,
+        /// a prometheus textfile to write after every run, for node exporter's
+        /// textfile collector: when this machine was last known healthy
+        #[arg(long, env = "NORN_METRICS_FILE")]
+        metrics_file: Option<PathBuf>,
         /// how long to wait for another run of this machine
         #[arg(long, default_value = "10s")]
         lock_wait: humantime::Duration,
@@ -113,6 +117,7 @@ fn main() -> ExitCode {
         Command::Converge {
             run,
             state_dir,
+            metrics_file,
             lock_wait,
         } => {
             let timing = timing(&run, lock_wait.into());
@@ -120,6 +125,7 @@ fn main() -> ExitCode {
                 &run.desired,
                 run.token_file.as_deref(),
                 &state_dir,
+                metrics_file.as_deref(),
                 timing,
                 run.max_deletes,
                 run.rollout().as_ref(),
