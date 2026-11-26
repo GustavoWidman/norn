@@ -216,9 +216,17 @@ impl Status {
         }
     }
 
+    /// the last moment this machine's norn was known healthy: the start of
+    /// its troubled streak, or else the end of its last run
+    pub fn healthy_at(&self) -> DateTime<Utc> {
+        self.troubled_since.unwrap_or(self.finished)
+    }
+
+    /// whether the machine was known healthy within `stale` of `now`
     pub fn fresh(&self, now: DateTime<Utc>, stale: Duration) -> bool {
-        let older = |at: DateTime<Utc>| (now - at).to_std().is_ok_and(|age| age > stale);
-        !older(self.finished) && !self.troubled_since.is_some_and(older)
+        !(now - self.healthy_at())
+            .to_std()
+            .is_ok_and(|age| age > stale)
     }
 
     pub fn describe(&self) -> String {
