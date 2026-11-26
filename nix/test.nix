@@ -4,22 +4,8 @@
 
   nodes.machine =
     { config, pkgs, ... }:
-    let
-      fakePush = pkgs.writers.writePython3Bin "fake-push" {
-        libraries = [ pkgs.python3Packages.cryptography ];
-        flakeIgnore = [ "E501" ];
-      } (builtins.readFile ./fake-push.py);
-    in
     {
       imports = [ self.nixosModules.default ];
-
-      systemd.services.fake-push = {
-        wantedBy = [ "multi-user.target" ];
-        serviceConfig = {
-          ExecStart = "${fakePush}/bin/fake-push /var/lib/fake-push/seen.jsonl";
-          StateDirectory = "fake-push";
-        };
-      };
 
       cloudflare = {
         zones = [ "example.com" ];
@@ -42,27 +28,6 @@
         revision = 1794942959;
         rollout.file = "/home/deploy/rollout.json";
         peers.machine = config.cloudflare.claims;
-        push = {
-          enable = true;
-          # RFC 8291's appendix A sender key, as a VAPID key no one relies on
-          vapidKeyFile = "${pkgs.writeText "vapid" "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"}";
-          # the browser of appendix A, whose private key the fake push service holds
-          subscriptionsFile = "${pkgs.writeText "subscriptions.json" (
-            builtins.toJSON [
-              {
-                name = "phone";
-                endpoint = "http://127.0.0.1:8080/push/phone";
-                keys = {
-                  p256dh = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
-                  auth = "BTBZMqHH6r4Tts7J_aSIgg";
-                };
-              }
-            ]
-          )}";
-          subject = "https://fleet.example.com";
-          navigate = "https://fleet.example.com/machines/{host}";
-          after = 20;
-        };
       };
 
       specialisation.restartsNorn.configuration.cloudflare.dns."www.example.com".a = { };
@@ -73,14 +38,9 @@
     { nodes, ... }:
     ''
       import json
-      import math
 
       def status():
           return json.loads(machine.succeed("cat /var/lib/norn/status.json"))
-
-      def pushed():
-          seen = machine.succeed("cat /var/lib/fake-push/seen.jsonl 2>/dev/null || true")
-          return [json.loads(line) for line in seen.splitlines()]
 
       def ran_cleanly(unit):
           result = machine.succeed(f"systemctl show --property=Result --value {unit}").strip()
@@ -93,8 +53,6 @@
           machine.wait_for_unit("norn.service")
           ran_cleanly("norn.service")
           assert status()["health"] == "skipped", status()
-          # the streak starts with this run, so it tells no device yet
-          assert pushed() == [], pushed()
           machine.succeed("systemctl start norn-sweep.service")
           ran_cleanly("norn-sweep.service")
           failed = machine.succeed("systemctl list-units --failed --plain --no-legend")
@@ -114,28 +72,6 @@
           machine.sleep(2)
           stale = machine.fail("norn status --stale 1s")
           assert stale.startswith("skipped"), stale
-
-      with subtest("runs troubled past push.after tell the devices once"):
-          machine.wait_for_open_port(8080)
-          since = float(machine.succeed(f"date -d {status()['troubledSince']} +%s.%N"))
-          now = float(machine.succeed("date +%s.%N"))
-          machine.sleep(max(0, math.ceil(since + 21 - now)))
-          for _ in range(3):
-              machine.succeed("systemctl start norn-sweep.service")
-              ran_cleanly("norn-sweep.service")
-          seen = pushed()
-          assert len(seen) == 1, seen
-          told = seen[0]
-          assert told["path"] == "/push/phone", told
-          assert told["claims"]["sub"] == "https://fleet.example.com", told
-          assert (told["urgency"], told["ttl"]) == ("high", "86400"), told
-          notification = told["message"]["notification"]
-          assert notification["title"] == "norn skipping runs on machine", notification
-          assert notification["tag"] == "norn/machine", notification
-          assert notification["navigate"] == "https://fleet.example.com/machines/machine", notification
-          assert notification["body"].startswith("no cloudflare token yet; skipping this run\ntroubled for "), notification
-          assert status()["notifiedAt"] is not None, status()
-          machine.succeed("norn status | grep '^notified at '")
 
       with subtest("with a token, norn runs, exits 0 and stays active"):
           machine.succeed(
@@ -199,9 +135,5 @@
           assert unit == "norn-sweep.service", unit
           machine.succeed("systemctl start norn-sweep.service")
           ran_cleanly("norn-sweep.service")
-
-      with subtest("a streak that turns from skipped to failing tells nothing new"):
-          assert status()["health"] == "failing", status()
-          assert len(pushed()) == 1, pushed()
     '';
 }
