@@ -25,7 +25,7 @@ use super::{
 };
 
 pub(super) struct Machine {
-    pub dir: TempDir,
+    dir: TempDir,
     host: &'static str,
     pub revision: Option<u64>,
     pub rollout: Option<RolloutFile>,
@@ -85,7 +85,7 @@ impl Machine {
         }
     }
 
-    pub fn declare(&self, mode: Mode, declared: Declared) -> PathBuf {
+    fn declare(&self, mode: Mode, declared: Declared) -> PathBuf {
         let (fleet, dns): (Vec<_>, Vec<_>) = declared
             .dns
             .into_iter()
@@ -126,7 +126,7 @@ impl Machine {
         self.dir.path().join("state")
     }
 
-    pub fn token(&self) -> PathBuf {
+    fn token(&self) -> PathBuf {
         self.dir.path().join("token")
     }
 
@@ -155,7 +155,6 @@ impl Machine {
             timing(),
             max_deletes,
             self.rollout.as_ref(),
-            None,
         )
     }
 
@@ -176,13 +175,13 @@ impl Machine {
     }
 }
 
-pub(super) const MAX_DELETES: usize = 10;
+const MAX_DELETES: usize = 10;
 
 fn zones() -> Zones {
     Zones::parse(&["example.com", "example.net", "example.org"].map(String::from)).unwrap()
 }
 
-pub(super) fn timing() -> Timing {
+fn timing() -> Timing {
     Timing {
         deadline: Duration::from_secs(30),
         per_request: Duration::from_secs(5),
@@ -425,7 +424,6 @@ fn a_run_past_its_deadline_sends_nothing_and_records_the_streak() {
             spent,
             MAX_DELETES,
             None,
-            None,
         )
     };
     assert_eq!(run(), Health::Failing);
@@ -460,7 +458,6 @@ fn a_missing_token_skips_the_run() {
         timing(),
         MAX_DELETES,
         None,
-        None,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -484,7 +481,6 @@ fn an_empty_token_skips_the_run() {
         &one.state(),
         timing(),
         MAX_DELETES,
-        None,
         None,
     );
     assert_eq!(health, Health::Skipped);
@@ -512,7 +508,6 @@ fn a_run_that_cannot_take_the_lock_leaves_the_work_to_the_next() {
         waiting,
         MAX_DELETES,
         None,
-        None,
     );
     assert_eq!(health, Health::Skipped);
     assert_eq!(fake.requests(), 0);
@@ -529,7 +524,6 @@ fn an_unreadable_desired_file_fails_the_run_not_the_process() {
         &one.state(),
         timing(),
         MAX_DELETES,
-        None,
         None,
     );
     assert_eq!(health, Health::Failing);
