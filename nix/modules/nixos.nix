@@ -28,21 +28,7 @@ let
       "--lock-wait"
       "10s"
     ]
-    ++ lib.optionals cfg.push.enable [
-      "--push-vapid-key-file"
-      "%d/push-vapid"
-      "--push-subscriptions-file"
-      "%d/push-subscriptions"
-    ]
   );
-
-  credentials = {
-    token = cfg.tokenFile;
-  }
-  // lib.optionalAttrs cfg.push.enable {
-    push-vapid = cfg.push.vapidKeyFile;
-    push-subscriptions = cfg.push.subscriptionsFile;
-  };
 
   unit = {
     wants = [ "network-online.target" ];
@@ -50,13 +36,12 @@ let
     serviceConfig = {
       Type = "oneshot";
       ExecStart = command;
-      LoadCredential = lib.mapAttrsToList (name: file: "${name}:${file}") credentials;
+      LoadCredential = "token:${cfg.tokenFile}";
       # a missing LoadCredential= source fails the unit, and with it the
-      # switch. these blank fallbacks reach norn as no token, which skips the
-      # run, and as push files it cannot use, which it logs. systemd ignores
-      # a SetCredential= with nothing after the colon, so each fallback is
-      # one escaped newline
-      SetCredential = map (name: "${name}:\\n") (lib.attrNames credentials);
+      # switch. this blank fallback reaches norn as no token, which skips the
+      # run. systemd ignores a SetCredential= with nothing after the colon, so
+      # the fallback is one escaped newline
+      SetCredential = "token:\\n";
 
       DynamicUser = true;
       User = "norn";

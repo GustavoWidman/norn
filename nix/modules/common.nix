@@ -178,17 +178,6 @@ let
     ${lib.getExe cfg.package} check --in "$rawPath" --out "$out"
   '';
 
-  pushAssertions = [
-    {
-      assertion = lib.hasPrefix "https://" cfg.push.subject || lib.hasPrefix "mailto:" cfg.push.subject;
-      message = "norn: services.norn.push.subject is ${cfg.push.subject}; a VAPID subject is an https: URL or a mailto: address.";
-    }
-    {
-      assertion = lib.hasPrefix "https://" cfg.push.navigate;
-      message = "norn: services.norn.push.navigate is ${cfg.push.navigate}; a notice opens an https: URL.";
-    }
-  ];
-
   fleetAssertions =
     let
       peers = lib.filterAttrs (_: claims: claims.enabled) cfg.peers;
@@ -469,56 +458,6 @@ in
       '';
     };
 
-    push = {
-      enable = lib.mkEnableOption ''
-        Web Push notices to the owner's devices: one when this machine's runs
-        have stayed troubled for `push.after`, and one when that ends. A fault
-        that lasts sends nothing more, and nothing about a notice changes a
-        run's outcome
-      '';
-
-      vapidKeyFile = mkOption {
-        type = types.str;
-        example = "/run/agenix/push-vapid";
-        description = ''
-          File holding the VAPID private key: the base64url of a P-256 scalar.
-          On NixOS the units get it as a credential, so it may belong to root.
-        '';
-      };
-
-      subscriptionsFile = mkOption {
-        type = types.str;
-        example = "/run/agenix/push-subscriptions";
-        description = ''
-          File holding the devices to notify: a JSON array of the browser's
-          `PushSubscription.toJSON()` objects, each with a `name` that logs
-          print in its place. It is read at every send, and on NixOS reaches
-          the units as a credential.
-        '';
-      };
-
-      subject = mkOption {
-        type = types.str;
-        example = "https://fleet.example.com";
-        description = "The VAPID subject: an `https:` URL or a `mailto:` address where push services can reach the sender.";
-      };
-
-      navigate = mkOption {
-        type = types.str;
-        example = "https://fleet.example.com/machines/{host}";
-        description = "The `https:` URL a tap on a notice opens. `{host}` stands for `services.norn.host`.";
-      };
-
-      after = mkOption {
-        type = types.ints.positive;
-        default = 1800;
-        description = ''
-          Seconds runs stay troubled before the devices hear of it. The
-          default is when `norn status` starts calling the machine troubled.
-        '';
-      };
-    };
-
     desired = mkOption {
       type = types.package;
       readOnly = true;
@@ -563,18 +502,10 @@ in
           cfg.rollout.file
           "--rollout-max-age"
           "${toString cfg.rollout.maxAge}s"
-        ]
-        ++ lib.optionals cfg.push.enable [
-          "--push-subject"
-          cfg.push.subject
-          "--push-navigate"
-          cfg.push.navigate
-          "--push-after"
-          "${toString cfg.push.after}s"
         ];
       };
 
-      assertions = fleetAssertions ++ lib.optionals cfg.push.enable pushAssertions;
+      assertions = fleetAssertions;
 
       environment.etc."norn/desired.json".source = desired;
       environment.systemPackages = [
@@ -590,16 +521,6 @@ in
               --set-default NORN_MAX_DELETES ${toString cfg.maxDeletes} ${
                 lib.optionalString (cfg.rollout.file != null)
                   "--set-default NORN_ROLLOUT ${lib.escapeShellArg cfg.rollout.file} --set-default NORN_ROLLOUT_MAX_AGE ${toString cfg.rollout.maxAge}s"
-              } ${
-                lib.optionalString cfg.push.enable (
-                  lib.concatMapStringsSep " " (pair: "--set-default ${lib.head pair} ${lib.escapeShellArg (lib.last pair)}") [
-                    [ "NORN_PUSH_VAPID_KEY_FILE" cfg.push.vapidKeyFile ]
-                    [ "NORN_PUSH_SUBSCRIPTIONS_FILE" cfg.push.subscriptionsFile ]
-                    [ "NORN_PUSH_SUBJECT" cfg.push.subject ]
-                    [ "NORN_PUSH_NAVIGATE" cfg.push.navigate ]
-                    [ "NORN_PUSH_AFTER" "${toString cfg.push.after}s" ]
-                  ]
-                )
               }
           '';
         })
