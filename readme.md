@@ -436,6 +436,56 @@ next sweep. a missing or empty token file skips the run, which counts as
 trouble if it keeps happening. that covers a secret not decrypted on this
 machine yet: the unit still exits 0, so it never holds up a deploy.
 
+## health
+
+a failing norn is quiet by design, since a run never fails a deploy, and it
+tells no one about it itself. what it does is write down, after every run,
+one prometheus gauge for node exporter's textfile collector to serve:
+
+```text
+# HELP norn_healthy_timestamp_seconds When norn was last known healthy on this machine: the start of its troubled streak, or else the end of its last run.
+# TYPE norn_healthy_timestamp_seconds gauge
+norn_healthy_timestamp_seconds 1794942959
+```
+
+it's the last moment norn was known healthy here, in unix seconds. a
+converged or held run moves it to when that run finished. a troubled one
+(failing, blocked or skipped) leaves it at the start of the streak, and a
+machine that stopped running norn at all leaves it wherever it was. both
+ways, it gets old, which is the one thing worth alerting on: older than 30
+minutes is exactly when `norn status` starts exiting 1.
+
+the module writes it to `norn.prom` in `services.norn.metrics.directory`,
+which is `/run/norn` on nixos and `/var/run/norn` on macos. the file outlives
+the units that write it, and anyone can read it, so node exporter only needs
+pointing at the directory:
+
+```nix
+services.prometheus.exporters.node = {
+  enable = true;
+  extraFlags = [
+    "--collector.textfile.directory=${config.services.norn.metrics.directory}"
+  ];
+};
+```
+
+then one rule covers a machine that's troubled and one that went silent:
+
+```yaml
+groups:
+  - name: norn
+    rules:
+      - alert: NornUnhealthy
+        expr: time() - norn_healthy_timestamp_seconds > 1800
+        annotations:
+          summary: norn on {{ $labels.instance }} has been troubled or silent for 30 minutes
+```
+
+a machine whose node exporter is down takes the series with it, and the rule
+goes quiet. that's for `up` to alert on, which you want anyway. outside the
+module, `norn converge --metrics-file <path>` (or `NORN_METRICS_FILE`) writes
+the gauge wherever you like, and without it norn writes none.
+
 ## commands
 
 the module puts `norn` on the path, already pointed at the machine's own
@@ -526,8 +576,10 @@ a few things norn deliberately leaves to you:
   secrets or other settings, so ones set by hand don't survive its next
   upload.
 - **a failing norn is quiet.** runs always exit 0, so nothing shows up in
-  `systemctl --failed`. `sudo norn status` is where to look: it exits 1 once
-  runs have been troubled, or silent, for 30 minutes.
+  `systemctl --failed`, and norn sends no alert of its own. `sudo norn
+  status` exits 1 once runs have been troubled, or silent, for 30 minutes,
+  and [the health gauge](#health) says the same to prometheus. somebody still
+  has to scrape it and alert on it.
 
 ## file structure
 
@@ -555,7 +607,7 @@ a few things norn deliberately leaves to you:
     ├── desired.rs     # what a machine declares, as its module renders it
     ├── model.rs       # host names, owners, revisions, domain names and zones
     ├── report.rs      # the printed plan
-    ├── status.rs      # status.json
+    ├── status.rs      # status.json and the health textfile
     └── test/          # an in-memory cloudflare, and the tests that use it
 ```
 
