@@ -30,6 +30,12 @@
         peers.machine = config.cloudflare.claims;
       };
 
+      services.prometheus.exporters.node = {
+        enable = true;
+        extraFlags = [ "--collector.textfile.directory=${config.services.norn.metrics.directory}" ];
+      };
+      environment.systemPackages = [ pkgs.curl ];
+
       specialisation.restartsNorn.configuration.cloudflare.dns."www.example.com".a = { };
     };
 
@@ -38,6 +44,7 @@
     { nodes, ... }:
     ''
       import json
+      from datetime import datetime
 
       def status():
           return json.loads(machine.succeed("cat /var/lib/norn/status.json"))
@@ -46,6 +53,23 @@
           result = machine.succeed(f"systemctl show --property=Result --value {unit}").strip()
           code = machine.succeed(f"systemctl show --property=ExecMainStatus --value {unit}").strip()
           assert (result, code) == ("success", "0"), (unit, result, code)
+
+      def healthy_at(status):
+          return int(datetime.fromisoformat(status["troubledSince"] or status["finished"]).timestamp())
+
+      # the textfile and its directory belong to the units' dynamic user, not
+      # root, and anyone can read them
+      def readable_by_all():
+          modes = machine.succeed("stat -c '%a %u' /run/norn /run/norn/norn.prom").split()
+          assert modes[0::2] == ["755", "644"] and modes[1] == modes[3] != "0", modes
+
+      # what node exporter serves of norn's textfile
+      def gauge():
+          metrics = machine.succeed("curl -sf http://127.0.0.1:9100/metrics")
+          assert "node_textfile_scrape_error 0" in metrics, metrics
+          values = [line.split()[1] for line in metrics.splitlines() if line.startswith("norn_healthy_timestamp_seconds ")]
+          assert len(values) == 1, metrics
+          return float(values[0])
 
       machine.wait_for_unit("multi-user.target")
 
@@ -57,6 +81,28 @@
           ran_cleanly("norn-sweep.service")
           failed = machine.succeed("systemctl list-units --failed --plain --no-legend")
           assert failed.strip() == "", failed
+
+      with subtest("node exporter serves when norn was last healthy, after the sweep has exited"):
+          machine.wait_for_unit("prometheus-node-exporter.service")
+          machine.wait_for_open_port(9100)
+          assert status()["troubledSince"] is not None, status()
+          since = healthy_at(status())
+          assert gauge() == since, (gauge(), status())
+          machine.sleep(1)
+          machine.succeed("systemctl start norn-sweep.service")
+          ran_cleanly("norn-sweep.service")
+          machine.fail("systemctl is-active norn-sweep.service")
+          assert healthy_at(status()) == since, status()
+          assert int(datetime.fromisoformat(status()["finished"]).timestamp()) > since, status()
+          readable_by_all()
+          assert gauge() == since, (gauge(), status())
+
+      with subtest("each run takes the textfile's directory back, whoever owns it"):
+          machine.succeed("chown root:root /run/norn", "chmod 0700 /run/norn", "chown root:root /run/norn/norn.prom")
+          machine.succeed("systemctl start norn-sweep.service")
+          ran_cleanly("norn-sweep.service")
+          readable_by_all()
+          assert gauge() == since, (gauge(), status())
 
       with subtest("without a token, a switch that restarts norn succeeds"):
           before = status()["finished"]
@@ -89,6 +135,9 @@
           assert ran["counts"]["unread"] == 3, ran
           described = machine.succeed("norn status")
           assert described.startswith("failing") and "unread: dns record example.com" in described, described
+          # the streak that began without a token goes on, and so does the gauge
+          assert healthy_at(ran) == since, ran
+          assert gauge() == since, (gauge(), ran)
 
       # every zone is unread, so the gate holds before it looks at the rollout
       # file; only the log says whether the unit could read it
@@ -135,5 +184,10 @@
           assert unit == "norn-sweep.service", unit
           machine.succeed("systemctl start norn-sweep.service")
           ran_cleanly("norn-sweep.service")
+
+      with subtest("the textfile outlives both units"):
+          machine.succeed("systemctl stop norn.service")
+          machine.fail("systemctl is-active norn.service norn-sweep.service")
+          assert gauge() == since == healthy_at(status()), (gauge(), status())
     '';
 }

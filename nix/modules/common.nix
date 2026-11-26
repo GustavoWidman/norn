@@ -458,6 +458,17 @@ in
       '';
     };
 
+    metrics.directory = mkOption {
+      type = types.str;
+      readOnly = true;
+      description = ''
+        The directory norn writes `norn.prom` to after every run: a
+        Prometheus textfile holding `norn_healthy_timestamp_seconds`, when
+        this machine's norn was last known healthy. Point node exporter's
+        `--collector.textfile.directory` at it.
+      '';
+    };
+
     desired = mkOption {
       type = types.package;
       readOnly = true;
@@ -490,6 +501,8 @@ in
           "${desired}"
           "--state-dir"
           "/var/lib/norn"
+          "--metrics-file"
+          "${cfg.metrics.directory}/norn.prom"
           "--deadline"
           "${toString cfg.deadline}s"
           "--request-timeout"
@@ -518,6 +531,7 @@ in
               --set-default NORN_DESIRED /etc/norn/desired.json \
               --set-default NORN_TOKEN_FILE ${lib.escapeShellArg cfg.tokenFile} \
               --set-default NORN_STATE_DIR /var/lib/norn \
+              --set-default NORN_METRICS_FILE ${lib.escapeShellArg "${cfg.metrics.directory}/norn.prom"} \
               --set-default NORN_MAX_DELETES ${toString cfg.maxDeletes} ${
                 lib.optionalString (cfg.rollout.file != null)
                   "--set-default NORN_ROLLOUT ${lib.escapeShellArg cfg.rollout.file} --set-default NORN_ROLLOUT_MAX_AGE ${toString cfg.rollout.maxAge}s"
