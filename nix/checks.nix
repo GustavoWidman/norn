@@ -34,6 +34,7 @@ let
                 ];
                 services.norn = {
                   package = norn;
+                  metrics.directory = "/run/norn";
                   tokenFile = "/run/agenix/cloudflare-token";
                   peers = lib.mapAttrs (_: machine: machine.config.cloudflare.claims) evaluated;
                 };
@@ -309,6 +310,7 @@ in
     grep -q '"revision": null' ${(machine "web-1").services.norn.desired}
     ${lib.optionalString (!lib.hasInfix "--rollout /var/lib/fleet/rollout.json --rollout-max-age 1800s" (toString sharing.services.norn.arguments)) "false"}
     ${lib.optionalString (lib.hasInfix "--rollout" (toString (machine "web-1").services.norn.arguments)) "false"}
+    ${lib.optionalString (!lib.hasInfix "--metrics-file /run/norn/norn.prom" (toString (machine "web-1").services.norn.arguments)) "false"}
     touch "$out"
   '';
 
